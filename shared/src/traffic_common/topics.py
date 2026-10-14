@@ -17,6 +17,7 @@ class Topic(StrEnum):
     INCIDENTS = "incidents"
     SUMMARIES = "summaries"
     DRIFT_ALERTS = "drift.alerts"
+    SIMULATOR_CONTROL = "simulator.control"
 
 
 class ConsumerGroup(StrEnum):
@@ -30,6 +31,7 @@ class ConsumerGroup(StrEnum):
     SUMMARIZER = "summarizer"
     API = "api"
     ML_MONITORING = "ml-monitoring"
+    EVENT_SIMULATOR = "event-simulator"
 
 
 DEAD_LETTER_PREFIX = "dlq."

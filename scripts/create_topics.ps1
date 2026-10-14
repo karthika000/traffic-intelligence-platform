@@ -30,7 +30,8 @@ $Topics = @(
     "nlp.results",
     "incidents",
     "summaries",
-    "drift.alerts"
+    "drift.alerts",
+    "simulator.control"
 )
 
 # One dead-letter topic per consumer group: dlq.<group>.
@@ -41,7 +42,8 @@ $ConsumerGroups = @(
     "fusion-service",
     "summarizer",
     "api",
-    "ml-monitoring"
+    "ml-monitoring",
+    "event-simulator"
 )
 $DeadLetterTopics = $ConsumerGroups | ForEach-Object { "dlq.$_" }
 # Low volume, inspected by humans: one partition, kept for 14 days.

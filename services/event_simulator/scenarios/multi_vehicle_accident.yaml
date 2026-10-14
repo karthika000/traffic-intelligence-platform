@@ -1,0 +1,55 @@
+# Three-car collision that blocks most of the junction, escalates while emergency
+# services work, then clears. ~18 minutes at time_scale 1.
+name: multi_vehicle_accident
+description: >
+  Multi-vehicle collision. First reports come from drivers and social media, speeds
+  collapse, police and the road operator confirm a closure, then lanes reopen.
+incident_type: accident
+
+phases:
+  - name: first_reports
+    duration: 2m
+    severity: high
+    ramp: 30s
+    reports:
+      per_minute: 3
+      sources: {driver: 3, social_media: 2}
+    traffic: {speed_factor: 0.5, count_factor: 0.75}
+
+  - name: escalation
+    duration: 4m
+    severity: critical
+    ramp: 60s
+    reports:
+      per_minute: 4
+      sources: {driver: 2, social_media: 3, police: 1, operator: 1}
+      incident_types: {accident: 0.8, congestion: 0.2}
+    traffic: {speed_factor: 0.15, count_factor: 0.3}
+
+  - name: emergency_response
+    duration: 6m
+    severity: critical
+    reports:
+      per_minute: 2
+      sources: {police: 2, operator: 2, social_media: 1}
+      incident_types: {accident: 0.7, congestion: 0.3}
+    traffic: {speed_factor: 0.2, count_factor: 0.4}
+
+  - name: partial_reopening
+    duration: 3m
+    severity: medium
+    ramp: 2m
+    reports:
+      per_minute: 1.5
+      sources: {operator: 2, driver: 1, social_media: 1}
+    traffic: {speed_factor: 0.55, count_factor: 0.8}
+
+  - name: resolution
+    duration: 3m
+    severity: low
+    ramp: 2m
+    reports:
+      per_minute: 1
+      sources: {operator: 2, police: 1, social_media: 1}
+      stage: cleared
+    traffic: {speed_factor: 0.95, count_factor: 1.1}

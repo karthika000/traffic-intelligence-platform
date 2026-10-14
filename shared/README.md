@@ -29,6 +29,7 @@ Shared Python package installed into every service image (and your `.venv` for l
 | `incidents` | `Incident` | always |
 | `summaries` | `Summary` | optional |
 | `drift.alerts` | `DriftAlert` | optional |
+| `simulator.control` | `SimulatorCommand` | optional |
 
 Every message has `schema_version` (currently `Literal[1]`), a `message_id` (UUID) and `timestamp`. The rules:
 
@@ -85,7 +86,7 @@ with Session() as s:
     cameras = s.query(models.Camera).all()
 ```
 
-Tables: `cameras`, `traffic_metrics`, `detection_aggregates`, `reports`, `nlp_results`, `anomalies`, `incidents`, `incident_evidence`, `summaries`, `model_versions`, `drift_reports`. Every table with a `camera_id` has a composite index on `(camera_id, <time>)` and a separate index on the time column. Enums are stored as strings with CHECK constraints.
+Tables: `cameras`, `traffic_metrics`, `detection_aggregates`, `reports`, `nlp_results`, `anomalies`, `incidents`, `incident_evidence`, `summaries`, `model_versions`, `drift_reports`, plus the simulator's ground truth: `scenario_runs` and `simulated_reports` (migration `0002`). `TextReport` and `RawEvent` carry an optional `scenario_id`, set on messages from simulated scenario runs. Every table with a `camera_id` has a composite index on `(camera_id, <time>)` and a separate index on the time column. Enums are stored as strings with CHECK constraints.
 
 Migrations ship inside the package, so they run from any directory and inside any service image:
 

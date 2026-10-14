@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow) and `video_ingest` are implemented. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest` and `event_simulator` are implemented. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -63,10 +63,11 @@ Created by `scripts/create_topics.ps1`, which `up.ps1` runs once Kafka is health
 | `incidents` | Fused incidents from `fusion_service` |
 | `summaries` | Text from `summarizer` |
 | `drift.alerts` | Model drift alerts from `ml/monitoring` |
+| `simulator.control` | Commands for `event_simulator` (start/stop scenarios) |
 
 There is also one dead-letter topic per consumer group, `dlq.<group>`:
 
-- **Topics:** `dlq.cv-inference`, `dlq.nlp-service`, `dlq.anomaly-service`, `dlq.fusion-service`, `dlq.summarizer`, `dlq.api`, `dlq.ml-monitoring`. Each has 1 partition and keeps messages for 14 days.
+- **Topics:** `dlq.cv-inference`, `dlq.nlp-service`, `dlq.anomaly-service`, `dlq.fusion-service`, `dlq.summarizer`, `dlq.api`, `dlq.ml-monitoring`, `dlq.event-simulator`. Each has 1 partition and keeps messages for 14 days.
 - **What lands there:** messages that fail validation, or that still fail after retries.
 - **Inspecting them:** browse them in Kafka UI. Each record carries `dlq.*` headers explaining why it failed.
 
@@ -100,14 +101,7 @@ python scripts\download_sample_videos.py
 
 The script downloads one openly licensed traffic video per demo camera from Wikimedia Commons into `data/videos/`. It uses the 480p versions, a few MB each, and points each camera's `stream_url` at its file. Licence and author are read from the Commons API, printed, and saved to `data/videos/ATTRIBUTION.md`. If a download fails, the script generates a synthetic video instead, so the pipeline still runs.
 
-| Camera | Commons file | Licence | Author |
-| --- | --- | --- | --- |
-| `cam-hyde-park-corner` | London roundabout.ogg | CC BY-SA 4.0 | Vcohen |
-| `cam-trafalgar-square` | Intersection Pie-IX-Sherbrooke.webm | CC BY-SA 4.0 | Thomas1313 |
-| `cam-elephant-castle` | Road traffic on Stritarjeva street.webm | CC BY 3.0 | Sounds of Changes |
-| `cam-old-street` | A intersection with traffic in Chiang Mai, Thailand.ogv | CC BY-SA 4.0 | Amada44 |
-
-If you redistribute these videos or anything derived from them, credit the author and keep the licence (CC BY-SA also requires sharing derivatives under the same licence).
+Licences and authors are listed under [Video credits](#video-credits).
 
 Options: `--force` (re-download), `--synthetic-only`, `--skip-db`.
 
@@ -119,6 +113,68 @@ Options: `--force` (re-download), `--synthetic-only`, `--skip-db`.
 ```powershell
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic video.frames --max-messages 5 --property print.key=true --property print.headers=true
 ```
+
+## Event simulator
+
+`event_simulator` produces the non-video inputs for every camera in the `cameras` table, re-reading the table every `CAMERA_REFRESH_SECONDS`:
+
+| Output | Topic | Rate |
+| --- | --- | --- |
+| Free-text reports (`TextReport`) | `reports.text` | One every `REPORT_INTERVAL_SECONDS` on average (default 10 s), across all cameras |
+| Weather (`RawEvent`, `event_type=weather`) | `events.raw` | Every `SENSOR_INTERVAL_SECONDS` (15 s) per camera |
+| Loop-detector readings (`RawEvent`, `event_type=loop_detector`) | `events.raw` | Every `SENSOR_INTERVAL_SECONDS` (15 s) per camera |
+
+How the inputs are generated:
+
+- **Reports** come from four source styles: formal road-operator bulletins, police updates, drivers (typos, lowercase, missing punctuation, abbreviations) and social media (emojis, hashtags, shouting). They cover 8 incident types (`accident`, `breakdown`, `road_works`, `congestion`, `weather_hazard`, `debris`, `police_activity`, and `none` for chatter) at 4 severities. The severity is written into the text, for example "minor bump, no injuries" versus "all lanes closed, casualties".
+- **Location mentions** vary: official names, nearby streets, landmarks, abbreviations, misspellings, and "street near landmark" combinations. Operators and police never misspell.
+- **Weather** changes condition rarely and moves gradually.
+- **Traffic** follows a daily pattern with weekday peaks around 08:00 and 17:30, flatter at weekends. Speed falls as flow rises.
+
+### Scenarios
+
+Scenarios are YAML files in [services/event_simulator/scenarios/](services/event_simulator/scenarios/): `multi_vehicle_accident`, `broken_down_lorry`, `flooding` and `road_works`. Each is a timeline of phases. A phase sets:
+
+- how many reports it emits, from which sources, with which incident types and severity;
+- the traffic effect (speed and count factors, ramped in);
+- optional weather.
+
+Every scenario ends with a phase of "cleared" reports. Every message a run emits carries its `scenario_id`.
+
+```powershell
+docker compose exec event_simulator python -m event_simulator.trigger --list
+docker compose exec event_simulator python -m event_simulator.trigger multi_vehicle_accident cam-hyde-park-corner
+docker compose exec event_simulator python -m event_simulator.trigger flooding cam-old-street --time-scale 10   # 10x faster
+docker compose exec event_simulator python -m event_simulator.trigger --stop <scenario_id>
+```
+
+The trigger CLI publishes a `SimulatorCommand` to `simulator.control`, and any other producer can do the same. Two more things to know:
+
+- **Scheduled scenarios:** set `SCENARIO_SCHEDULE_MINUTES` to start a random scenario on a random idle camera every N minutes. It is off by default.
+- **Limits:** each camera runs one scenario at a time, and commands older than 10 minutes are ignored.
+
+### Ground truth
+
+Every simulated report is stored with its labels in `simulated_reports`: incident type, severity, source style, `location_mention`, stage, scenario and phase. Every run is stored in `scenario_runs`: scenario, camera, status, trigger, and the timeline with actual start and end times. Both tables are kept separate from `reports` and `incidents`, which hold what the platform itself ingests and infers. Evaluation joins the two worlds on `report_id` and `scenario_id`.
+
+```sql
+SELECT scenario_name, camera_id, status, started_at, ended_at, reports_emitted FROM scenario_runs ORDER BY started_at DESC;
+SELECT phase, incident_type, severity, style, text FROM simulated_reports WHERE scenario_run_id = '<scenario_id>';
+```
+
+### NLP training data
+
+```powershell
+docker compose exec event_simulator python -m event_simulator.dataset            # writes ./data/nlp/
+```
+
+The command writes `data/nlp/reports_train.csv` (5,000 rows) and `data/nlp/reports_test.csv` (1,000 rows), with columns `text, incident_type, severity, camera_id, location_mention, source`. It then prints the class distribution. The two splits differ in three ways:
+
+- **Seeds:** each split uses a different random seed.
+- **Phrasings:** every phrase pool (templates, incident and severity phrases, location forms) has held-out entries that only the test split uses, about half the time. A good test score therefore means the model generalises beyond memorised templates.
+- **Duplicates:** texts are unique within each split, and no test text appears in train.
+
+Options: `--train N`, `--test N`, `--train-seed`, `--test-seed`, `--out DIR`.
 
 ## Repository layout
 
@@ -179,7 +235,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e "shared[dev]" -r services\video_ingest\requirements.txt
+pip install -e "shared[dev]" -r services\video_ingest\requirements.txt -r services\event_simulator\requirements.txt
 ```
 
 ### Database migrations
@@ -213,8 +269,15 @@ ruff check .
 | `test_skeleton.py` | nothing | Settings, logging, lifecycle, service layout |
 | `test_video_ingest.py` | nothing | Frame sampling, resizing, JPEG encoding, stream_url parsing, file naming, retention, health metrics |
 | `test_video_ingest_integration.py` | Kafka | A worker on a short synthetic video publishes to `video.frames`, plus retry when a source is missing |
+| `test_event_simulator.py` | nothing | Report variety and label correctness, train/test holdout separation, dataset files, daily traffic pattern, weather, scenario YAML parsing and timelines, scenario runs, control commands |
+| `test_event_simulator_integration.py` | Kafka + Postgres | A scenario triggered through `simulator.control` emits tagged messages on `reports.text` and `events.raw`, and its ground truth lands in `scenario_runs` and `simulated_reports` |
 
-Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. The one exception on Kafka is the video_ingest integration test: it publishes a few dozen frames to the real `video.frames` topic under a `test-cam-<id>` camera id. Those messages stay until Kafka retention removes them, and their frame files no longer exist.
+Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. Two integration tests do publish to real topics:
+
+- **video_ingest:** a few dozen frames on `video.frames`, under a `test-cam-<id>` camera id. Their frame files no longer exist.
+- **event_simulator:** a scenario's reports and events on `reports.text` and `events.raw`, tagged with a `test-cam-<id>` camera and that run's `scenario_id`. The live simulator also receives the test's control command and logs `rejected start_scenario … unknown camera`, as intended.
+
+Those messages stay until Kafka retention removes them.
 
 On Windows, Smart App Control can block confluent-kafka's native library, so `import confluent_kafka` fails and the Kafka tests skip under `-Local`. The default `test.ps1` mode runs in Linux and isn't affected.
 
@@ -262,3 +325,16 @@ To check whether a port is free, look on the Windows side and inside WSL:
 Get-NetTCPConnection -LocalPort 5432 -State Listen -ErrorAction SilentlyContinue
 wsl -e ss -ltn "sport = :5432"
 ```
+
+## Video credits
+
+The demo camera videos are not stored in git (`data/` is ignored); `scripts/download_sample_videos.py` fetches them from Wikimedia Commons. This section records their attribution, copied from the `data/videos/ATTRIBUTION.md` the script generates. If you redistribute these videos or material derived from them (for example extracted frames or screenshots), credit the author and keep the licence. CC BY-SA additionally requires sharing derivatives under the same licence.
+
+| Local file (camera) | Commons file | Author | Licence |
+| --- | --- | --- | --- |
+| `cam-hyde-park-corner.webm` | [London roundabout.ogg](https://commons.wikimedia.org/wiki/File:London_roundabout.ogg) | Vcohen | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
+| `cam-trafalgar-square.webm` | [Intersection Pie-IX-Sherbrooke.webm](https://commons.wikimedia.org/wiki/File:Intersection_Pie-IX-Sherbrooke.webm) | Thomas1313 | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
+| `cam-elephant-castle.webm` | [Road traffic on Stritarjeva street.webm](https://commons.wikimedia.org/wiki/File:Road_traffic_on_Stritarjeva_street.webm) | Sounds of Changes | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
+| `cam-old-street.webm` | [A intersection with traffic in Chiang Mai, Thailand.ogv](https://commons.wikimedia.org/wiki/File:A_intersection_with_traffic_in_Chiang_Mai,_Thailand.ogv) | Amada44 | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
+
+The local files are Wikimedia's 480p VP9 transcodes of these originals. The camera names are fictional placements: the footage was not filmed at the London junctions the demo cameras are named after.

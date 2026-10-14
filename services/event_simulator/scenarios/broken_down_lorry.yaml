@@ -1,0 +1,45 @@
+# An HGV breaks down in a live lane; queues build until a recovery truck tows it.
+# ~16 minutes at time_scale 1.
+name: broken_down_lorry
+description: >
+  Broken-down lorry blocking a lane. Mild at first, then queues grow and congestion
+  reports appear; the operator and police manage it until recovery, then it clears.
+incident_type: breakdown
+
+phases:
+  - name: breakdown
+    duration: 3m
+    severity: medium
+    ramp: 45s
+    reports:
+      per_minute: 1.5
+      sources: {driver: 3, social_media: 1}
+    traffic: {speed_factor: 0.7, count_factor: 0.85}
+
+  - name: queues_building
+    duration: 5m
+    severity: high
+    ramp: 2m
+    reports:
+      per_minute: 3
+      sources: {driver: 2, social_media: 2, operator: 1}
+      incident_types: {breakdown: 0.6, congestion: 0.4}
+    traffic: {speed_factor: 0.35, count_factor: 0.6}
+
+  - name: recovery_on_scene
+    duration: 5m
+    severity: medium
+    reports:
+      per_minute: 1.5
+      sources: {operator: 2, police: 1, driver: 1}
+    traffic: {speed_factor: 0.45, count_factor: 0.7}
+
+  - name: cleared
+    duration: 3m
+    severity: low
+    ramp: 2m
+    reports:
+      per_minute: 1
+      sources: {operator: 2, driver: 1, social_media: 1}
+      stage: cleared
+    traffic: {speed_factor: 1.0, count_factor: 1.05}

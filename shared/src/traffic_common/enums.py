@@ -47,3 +47,23 @@ class ModelStage(StrEnum):
     STAGING = "staging"
     PRODUCTION = "production"
     ARCHIVED = "archived"
+
+
+class IncidentType(StrEnum):
+    """Incident categories for text reports (labels for the NLP model). ``none`` is chatter."""
+
+    ACCIDENT = "accident"
+    BREAKDOWN = "breakdown"
+    ROAD_WORKS = "road_works"
+    CONGESTION = "congestion"
+    WEATHER_HAZARD = "weather_hazard"
+    DEBRIS = "debris"
+    POLICE_ACTIVITY = "police_activity"
+    NONE = "none"
+
+
+class ScenarioStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"

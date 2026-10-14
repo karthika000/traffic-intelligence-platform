@@ -138,6 +138,8 @@ class TextReport(KafkaMessage):
     location_name: ShortStr | None = None
     latitude: Latitude | None = None
     longitude: Longitude | None = None
+    # Set on messages emitted by a simulated scenario run (ground truth in scenario_runs).
+    scenario_id: UUID | None = None
 
     @model_validator(mode="after")
     def _coordinates_paired(self) -> Self:
@@ -155,6 +157,7 @@ class RawEvent(KafkaMessage):
     camera_id: CameraId | None = None
     severity: Severity | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+    scenario_id: UUID | None = None  # set by simulated scenario runs
 
 
 class Entity(BaseModel):
@@ -258,6 +261,26 @@ class DriftAlert(_Window, KafkaMessage):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+# --------------------------------------------------------------------------- control
+
+
+class SimulatorCommand(KafkaMessage):
+    """Control message for event_simulator on ``simulator.control``."""
+
+    action: Literal["start_scenario", "stop_scenario"]
+    scenario_id: UUID = Field(default_factory=uuid4)
+    scenario: ShortStr | None = None  # YAML file name without extension
+    camera_id: CameraId | None = None
+    time_scale: float = Field(default=1.0, gt=0, le=1000)  # >1 runs the timeline faster
+    requested_by: ShortStr = "cli"
+
+    @model_validator(mode="after")
+    def _start_has_target(self) -> Self:
+        if self.action == "start_scenario" and (self.scenario is None or self.camera_id is None):
+            raise ValueError("start_scenario needs scenario and camera_id")
+        return self
+
+
 TOPIC_SCHEMAS: Mapping[str, type[KafkaMessage]] = MappingProxyType(
     {
         Topic.VIDEO_FRAMES: FrameMessage,
@@ -270,6 +293,7 @@ TOPIC_SCHEMAS: Mapping[str, type[KafkaMessage]] = MappingProxyType(
         Topic.INCIDENTS: Incident,
         Topic.SUMMARIES: Summary,
         Topic.DRIFT_ALERTS: DriftAlert,
+        Topic.SIMULATOR_CONTROL: SimulatorCommand,
     }
 )
 

@@ -10,7 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY shared/ /tmp/shared/
 COPY services/video_ingest/requirements.txt /tmp/requirements/video_ingest.txt
-RUN pip install "/tmp/shared[dev]" -r /tmp/requirements/video_ingest.txt && rm -rf /tmp/shared /tmp/requirements
+COPY services/event_simulator/requirements.txt /tmp/requirements/event_simulator.txt
+RUN pip install "/tmp/shared[dev]" -r /tmp/requirements/video_ingest.txt \
+        -r /tmp/requirements/event_simulator.txt && rm -rf /tmp/shared /tmp/requirements
 
 WORKDIR /repo
 ENTRYPOINT ["python", "-m", "pytest", "-p", "no:cacheprovider"]

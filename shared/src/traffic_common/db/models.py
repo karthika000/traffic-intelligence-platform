@@ -35,8 +35,10 @@ from traffic_common.enums import (
     DriftType,
     EvidenceType,
     IncidentStatus,
+    IncidentType,
     ModelStage,
     ReportSource,
+    ScenarioStatus,
     Severity,
     SummaryScope,
 )
@@ -364,4 +366,68 @@ class DriftReport(Base):
         Index("ix_drift_reports_model_name_created_at", "model_name", "created_at"),
         Index("ix_drift_reports_camera_id_created_at", "camera_id", "created_at"),
         Index("ix_drift_reports_created_at", "created_at"),
+    )
+
+
+# ------------------------------------------------------------------ simulation ground truth
+# Written only by event_simulator. Kept apart from the operational tables (reports, incidents, ...)
+# so labels never mix with what the platform itself ingests and infers.
+
+
+class ScenarioRun(Base):
+    """One execution of a simulated scenario; every message it emits carries its id."""
+
+    __tablename__ = "scenario_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # scenario_id in messages
+    scenario_name: Mapped[str] = mapped_column(String(100))
+    camera_id: Mapped[str] = _camera_fk()
+    incident_type: Mapped[IncidentType] = mapped_column(_enum(IncidentType, "incident_type"))
+    peak_severity: Mapped[Severity] = mapped_column(_enum(Severity, "severity"))
+    status: Mapped[ScenarioStatus] = mapped_column(
+        _enum(ScenarioStatus, "scenario_status"), server_default=ScenarioStatus.RUNNING.value
+    )
+    triggered_by: Mapped[str] = mapped_column(String(50))
+    time_scale: Mapped[float] = mapped_column(server_default=text("1"))
+    started_at: Mapped[datetime]
+    expected_end_at: Mapped[datetime]
+    ended_at: Mapped[datetime | None]
+    # Phases with their actual start/end times, as run (after time scaling).
+    timeline: Mapped[list[dict[str, Any]]] = mapped_column(server_default=text("'[]'::jsonb"))
+    definition: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    reports_emitted: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    events_emitted: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint("time_scale > 0", name="time_scale_positive"),
+        Index("ix_scenario_runs_camera_id_started_at", "camera_id", "started_at"),
+        Index("ix_scenario_runs_started_at", "started_at"),
+    )
+
+
+class SimulatedReport(Base):
+    """Ground-truth labels for every TextReport the simulator emitted."""
+
+    __tablename__ = "simulated_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # TextReport.report_id
+    scenario_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scenario_runs.id", ondelete="CASCADE")
+    )
+    camera_id: Mapped[str] = _camera_fk()
+    source: Mapped[ReportSource] = mapped_column(_enum(ReportSource, "report_source"))
+    style: Mapped[str] = mapped_column(String(20))  # driver, police, operator, social_media
+    text: Mapped[str] = mapped_column(Text)
+    incident_type: Mapped[IncidentType] = mapped_column(_enum(IncidentType, "incident_type"))
+    severity: Mapped[Severity] = mapped_column(_enum(Severity, "severity"))
+    location_mention: Mapped[str | None]  # exact substring of text, if any
+    stage: Mapped[str] = mapped_column(String(20))  # active | cleared
+    phase: Mapped[str | None] = mapped_column(String(50))
+    emitted_at: Mapped[datetime]
+
+    __table_args__ = (
+        Index("ix_simulated_reports_camera_id_emitted_at", "camera_id", "emitted_at"),
+        Index("ix_simulated_reports_emitted_at", "emitted_at"),
+        Index("ix_simulated_reports_scenario_run_id", "scenario_run_id"),
     )

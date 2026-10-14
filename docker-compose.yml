@@ -37,6 +37,8 @@ services:
   event_simulator:
     <<: *python-service
     build: { context: ., dockerfile: services/event_simulator/Dockerfile }
+    volumes:
+      - ./data/nlp:/data/nlp   # generated NLP datasets (python -m event_simulator.dataset)
 
   cv_inference:
     <<: *python-service

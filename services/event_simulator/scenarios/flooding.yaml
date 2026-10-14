@@ -1,0 +1,59 @@
+# A cloudburst floods the junction: rain intensifies, surface water becomes impassable,
+# the road is closed, then the water recedes. ~22 minutes at time_scale 1.
+name: flooding
+description: >
+  Flash flooding. Weather changes first (heavy rain, poor visibility), reports move from
+  spray and puddles to an impassable road, traffic collapses, then the water recedes.
+incident_type: weather_hazard
+
+phases:
+  - name: heavy_rain
+    duration: 4m
+    severity: low
+    ramp: 2m
+    reports:
+      per_minute: 1
+      sources: {driver: 1, social_media: 2}
+    traffic: {speed_factor: 0.8, count_factor: 0.9}
+    weather: {condition: heavy_rain, precipitation_mm_h: 22, visibility_m: 1500}
+
+  - name: surface_water
+    duration: 5m
+    severity: high
+    ramp: 2m
+    reports:
+      per_minute: 3
+      sources: {driver: 2, social_media: 3, operator: 1}
+    traffic: {speed_factor: 0.45, count_factor: 0.6}
+    weather: {condition: heavy_rain, precipitation_mm_h: 38, visibility_m: 800}
+
+  - name: road_closed
+    duration: 6m
+    severity: critical
+    reports:
+      per_minute: 2.5
+      sources: {operator: 2, police: 2, social_media: 2}
+      incident_types: {weather_hazard: 0.75, congestion: 0.25}
+    traffic: {speed_factor: 0.12, count_factor: 0.2}
+    weather: {condition: rain, precipitation_mm_h: 9, visibility_m: 2500}
+
+  - name: receding
+    duration: 4m
+    severity: medium
+    ramp: 3m
+    reports:
+      per_minute: 1.5
+      sources: {operator: 2, driver: 1}
+    traffic: {speed_factor: 0.6, count_factor: 0.75}
+    weather: {condition: light_rain, precipitation_mm_h: 1.5, visibility_m: 5000}
+
+  - name: reopened
+    duration: 3m
+    severity: low
+    ramp: 2m
+    reports:
+      per_minute: 1
+      sources: {operator: 2, police: 1, social_media: 1}
+      stage: cleared
+    traffic: {speed_factor: 0.95, count_factor: 1.0}
+    weather: {condition: cloudy}

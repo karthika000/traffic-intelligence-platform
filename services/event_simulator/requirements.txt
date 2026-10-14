@@ -1,2 +1,5 @@
 # Service-specific dependencies for event_simulator.
 # traffic-common (shared/) is installed separately by the Dockerfile.
+pyyaml>=6.0,<7
+tzdata>=2024.1  # zoneinfo data; slim images and Windows have none
+

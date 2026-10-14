@@ -1,0 +1,45 @@
+# Planned works with a lane closure that overruns into the rush hour.
+# ~20 minutes at time_scale 1.
+name: road_works
+description: >
+  Planned road works. The operator announces them, a lane closes, the works overrun
+  and cause congestion, then they finish and the lane reopens.
+incident_type: road_works
+
+phases:
+  - name: announced
+    duration: 3m
+    severity: low
+    reports:
+      per_minute: 0.7
+      sources: {operator: 3, police: 1}
+    traffic: {speed_factor: 0.95, count_factor: 1.0}
+
+  - name: lane_closed
+    duration: 6m
+    severity: medium
+    ramp: 90s
+    reports:
+      per_minute: 1.5
+      sources: {operator: 2, driver: 2, social_media: 1}
+    traffic: {speed_factor: 0.65, count_factor: 0.8}
+
+  - name: overrun
+    duration: 7m
+    severity: high
+    ramp: 2m
+    reports:
+      per_minute: 2.5
+      sources: {driver: 3, social_media: 3, operator: 1}
+      incident_types: {road_works: 0.6, congestion: 0.4}
+    traffic: {speed_factor: 0.35, count_factor: 0.6}
+
+  - name: completed
+    duration: 4m
+    severity: low
+    ramp: 2m
+    reports:
+      per_minute: 1
+      sources: {operator: 3, driver: 1}
+      stage: cleared
+    traffic: {speed_factor: 1.0, count_factor: 1.0}

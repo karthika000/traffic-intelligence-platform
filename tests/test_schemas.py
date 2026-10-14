@@ -19,6 +19,7 @@ from traffic_common.schemas import (
     KafkaMessage,
     NLPResult,
     RawEvent,
+    SimulatorCommand,
     Summary,
     TextReport,
     TrafficMetrics,
@@ -120,6 +121,12 @@ VALID: dict[type[KafkaMessage], dict] = {
         "window_start": T0,
         "window_end": T1,
     },
+    SimulatorCommand: {
+        "action": "start_scenario",
+        "scenario": "multi_vehicle_accident",
+        "camera_id": CAM,
+        "time_scale": 10,
+    },
 }
 
 
@@ -210,6 +217,9 @@ def test_messages_are_immutable() -> None:
         (Summary, {"camera_id": None}, "camera_id"),
         (Summary, {"scope": SummaryScope.INCIDENT}, "incident_id"),
         (DriftAlert, {"drift_type": "vibes"}, "drift_type"),
+        (SimulatorCommand, {"camera_id": None}, "needs scenario and camera_id"),
+        (SimulatorCommand, {"time_scale": 0}, "greater than 0"),
+        (SimulatorCommand, {"action": "explode"}, "action"),
     ],
 )
 def test_validation_errors(schema: type[KafkaMessage], override: dict, error: str) -> None:
