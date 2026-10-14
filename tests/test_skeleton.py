@@ -22,9 +22,24 @@ SERVICES = [
 def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("LOG_LEVEL", "debug")
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+    monkeypatch.setenv("POSTGRES_URL", "postgresql://u:p@postgres:5432/db")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
     settings = get_settings("api")
     assert settings.environment == "test"
     assert settings.log_level == "DEBUG"
+    assert settings.kafka_bootstrap_servers == "kafka:29092"
+    assert settings.postgres_url == "postgresql://u:p@postgres:5432/db"
+    assert settings.mlflow_tracking_uri == "http://mlflow:5000"
+
+
+def test_settings_defaults_point_at_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("KAFKA_BOOTSTRAP_SERVERS", "POSTGRES_URL", "MLFLOW_TRACKING_URI"):
+        monkeypatch.delenv(var, raising=False)
+    settings = get_settings("api")
+    assert settings.kafka_bootstrap_servers == "localhost:9092"
+    assert settings.postgres_url.endswith("@localhost:5432/traffic")
+    assert settings.mlflow_tracking_uri == "http://localhost:5000"
 
 
 def test_logger_is_not_duplicated() -> None:

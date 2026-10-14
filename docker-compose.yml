@@ -2,6 +2,9 @@ name: ${COMPOSE_PROJECT_NAME:-traffic-intel}
 
 # Shared settings for every Python service. Build context is the repo root so
 # each image can install the shared/ package.
+#
+# .env holds host-side addresses (localhost:<port>) for local development; the
+# `environment` block below overrides them with in-network addresses.
 x-python-service: &python-service
   env_file:
     - path: .env
@@ -9,10 +12,19 @@ x-python-service: &python-service
   environment:
     APP_ENV: ${APP_ENV:-development}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+  depends_on:
+    kafka:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
   restart: unless-stopped
   networks: [traffic]
 
 services:
+  # ---------------------------------------------------------------- app services
   video_ingest:
     <<: *python-service
     build: { context: ., dockerfile: services/video_ingest/Dockerfile }
@@ -68,5 +80,136 @@ services:
     depends_on: [api]
     networks: [traffic]
 
+  # -------------------------------------------------------------- infrastructure
+  # Single-node Kafka in KRaft mode (combined broker + controller, no ZooKeeper).
+  #   INTERNAL   kafka:29092              containers on the compose network
+  #   EXTERNAL   localhost:${KAFKA_PORT}  host tools and local development
+  #   CONTROLLER kafka:29093              KRaft quorum, never published (9093 is reserved by Windows here)
+  kafka:
+    image: apache/kafka:3.8.0
+    hostname: kafka
+    environment:
+      # Base64-encoded UUID. Changing it requires deleting the kafka_data volume.
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by scripts/create_topics.ps1, so typos fail loudly.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+    networks: [traffic]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    environment:
+      KAFKA_CLUSTERS_0_NAME: traffic-intel
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    ports:
+      - "${KAFKA_UI_PORT:-8080}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+    networks: [traffic]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-traffic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-traffic}
+      POSTGRES_DB: ${POSTGRES_DB:-traffic}
+      MLFLOW_DB: ${MLFLOW_DB:-mlflow}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP check: the temporary server used while init scripts run only listens on a socket,
+      # so this stays unhealthy until initialisation (including the mlflow DB) has finished.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+    restart: unless-stopped
+    networks: [traffic]
+
+  mlflow:
+    build: { context: ./infra/mlflow }
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql+psycopg2://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${MLFLOW_DB:-mlflow}
+      - --artifacts-destination=/mlartifacts
+      - --serve-artifacts
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+    networks: [traffic]
+
+  adminer:
+    image: adminer:4.8.1
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "${ADMINER_PORT:-8081}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://localhost:8080/') === false ? 1 : 0);"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [traffic]
+
 networks:
   traffic:
+
+volumes:
+  kafka_data:
+  postgres_data:
+  mlflow_artifacts:
