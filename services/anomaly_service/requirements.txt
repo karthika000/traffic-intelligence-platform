@@ -1,0 +1,2 @@
+# Service-specific dependencies for anomaly_service.
+# traffic-common (shared/) is installed separately by the Dockerfile.

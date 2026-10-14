@@ -1,0 +1,72 @@
+name: ${COMPOSE_PROJECT_NAME:-traffic-intel}
+
+# Shared settings for every Python service. Build context is the repo root so
+# each image can install the shared/ package.
+x-python-service: &python-service
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    APP_ENV: ${APP_ENV:-development}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  restart: unless-stopped
+  networks: [traffic]
+
+services:
+  video_ingest:
+    <<: *python-service
+    build: { context: ., dockerfile: services/video_ingest/Dockerfile }
+    volumes:
+      - ./data:/data
+
+  event_simulator:
+    <<: *python-service
+    build: { context: ., dockerfile: services/event_simulator/Dockerfile }
+
+  cv_inference:
+    <<: *python-service
+    build: { context: ., dockerfile: services/cv_inference/Dockerfile }
+    volumes:
+      - ./models:/models:ro
+
+  nlp_service:
+    <<: *python-service
+    build: { context: ., dockerfile: services/nlp_service/Dockerfile }
+    volumes:
+      - ./models:/models:ro
+
+  anomaly_service:
+    <<: *python-service
+    build: { context: ., dockerfile: services/anomaly_service/Dockerfile }
+    volumes:
+      - ./models:/models:ro
+
+  fusion_service:
+    <<: *python-service
+    build: { context: ., dockerfile: services/fusion_service/Dockerfile }
+
+  summarizer:
+    <<: *python-service
+    build: { context: ., dockerfile: services/summarizer/Dockerfile }
+
+  api:
+    <<: *python-service
+    build: { context: ., dockerfile: services/api/Dockerfile }
+    ports:
+      - "${API_PORT:-8001}:8000"
+
+  dashboard:
+    build: { context: ./dashboard }
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:${API_PORT:-8001}}
+      VITE_USE_POLLING: "true"
+    ports:
+      - "${DASHBOARD_PORT:-5173}:5173"
+    volumes:
+      - ./dashboard:/app
+      - /app/node_modules
+    depends_on: [api]
+    networks: [traffic]
+
+networks:
+  traffic:

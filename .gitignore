@@ -1,0 +1,55 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ---- Node ----
+node_modules/
+dashboard/dist/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+
+# ---- Environment ----
+.env
+.env.*
+!.env.example
+
+# ---- Data & models (keep directory placeholders) ----
+data/*
+!data/.gitkeep
+!data/README.md
+models/*
+!models/.gitkeep
+!models/README.md
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+*.safetensors
+
+# ---- Experiment tracking ----
+mlruns/
+mlartifacts/
+wandb/
+
+# ---- OS / editors ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json

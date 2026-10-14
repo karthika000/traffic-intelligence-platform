@@ -1,0 +1,16 @@
+# Root build context is used by the Python services; keep it small.
+.git
+.env
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+.venv
+venv
+dashboard
+data
+models
+mlruns
+ml
+tests
