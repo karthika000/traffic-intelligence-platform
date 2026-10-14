@@ -36,14 +36,15 @@ BOX = {"x_min": 0.1, "y_min": 0.2, "x_max": 0.3, "y_max": 0.4}
 VALID: dict[type[KafkaMessage], dict] = {
     FrameMessage: {
         "camera_id": CAM,
-        "frame_index": 42,
-        "width": 1920,
-        "height": 1080,
-        "image_uri": "s3://frames/cam/42.jpg",
+        "sequence": 42,
+        "frame_path": f"/data/frames/{CAM}/20261014T080000.000000Z.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_fps": 29.97,
     },
     Detection: {
         "camera_id": CAM,
-        "frame_index": 42,
+        "frame_id": uuid4(),
         "model_name": "yolo",
         "model_version": "11n",
         "objects": [{"label": "car", "confidence": 0.91, "bbox": BOX, "track_id": 7}],
@@ -177,8 +178,9 @@ def test_messages_are_immutable() -> None:
 @pytest.mark.parametrize(
     ("schema", "override", "error"),
     [
-        (FrameMessage, {"image_b64": "aGk="}, "exactly one"),
-        (FrameMessage, {"image_uri": None}, "exactly one"),
+        (FrameMessage, {"frame_path": ""}, "at least 1"),
+        (FrameMessage, {"sequence": -1}, "greater than or equal"),
+        (FrameMessage, {"source_fps": 0}, "greater than 0"),
         (FrameMessage, {"width": 0}, "greater than 0"),
         (
             Detection,

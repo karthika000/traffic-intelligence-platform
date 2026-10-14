@@ -9,7 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/repo/shared/src
 
 COPY shared/ /tmp/shared/
-RUN pip install "/tmp/shared[dev]" && rm -rf /tmp/shared
+COPY services/video_ingest/requirements.txt /tmp/requirements/video_ingest.txt
+RUN pip install "/tmp/shared[dev]" -r /tmp/requirements/video_ingest.txt && rm -rf /tmp/shared /tmp/requirements
 
 WORKDIR /repo
 ENTRYPOINT ["python", "-m", "pytest", "-p", "no:cacheprovider"]

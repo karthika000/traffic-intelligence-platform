@@ -1,11 +1,11 @@
 # One lint configuration for the whole repo (services, shared, tests, ml).
 line-length = 100
 target-version = "py311"
-src = ["shared/src", "tests"]
+src = ["shared/src", "tests", "services/video_ingest"]
 extend-exclude = ["**/migrations/versions/*.py"]
 
 [lint]
 select = ["E", "F", "I", "B", "UP"]
 
 [lint.isort]
-known-first-party = ["traffic_common"]
+known-first-party = ["traffic_common", "video_ingest"]

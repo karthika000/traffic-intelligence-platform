@@ -1,2 +1,4 @@
 # Service-specific dependencies for video_ingest.
 # traffic-common (shared/) is installed separately by the Dockerfile.
+opencv-python-headless>=4.10,<5
+

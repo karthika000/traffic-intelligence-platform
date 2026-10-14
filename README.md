@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow) is real. The app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow) and `video_ingest` are implemented. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -72,6 +72,54 @@ There is also one dead-letter topic per consumer group, `dlq.<group>`:
 
 `create_topics.ps1` prints a Kafka warning for every topic with a `.` in its name. It's harmless: the warning is about topics that differ only by `.` versus `_`, and none of ours do.
 
+## Video ingest
+
+`video_ingest` runs one worker thread per row in the `cameras` table, and re-reads the table every `CAMERA_REFRESH_SECONDS`. New cameras start, removed ones stop, and a camera whose `stream_url` changes is restarted.
+
+For each camera it:
+
+1. **Reads** the source. `stream_url` can be a file under `/data/videos` (which maps to `./data/videos`), an `rtsp://` URL, or an `http(s)://` URL. Files play in real time and loop forever, simulating a live feed.
+2. **Samples** frames at `FRAME_SAMPLE_FPS`.
+3. **Resizes** frames to at most `FRAME_MAX_WIDTH`, keeping the aspect ratio, and JPEG-encodes them at `FRAME_JPEG_QUALITY`.
+4. **Writes** each frame to the shared `frames` volume as `/data/frames/<camera_id>/<timestamp>.jpg`. The volume is read-write for `video_ingest` and read-only for `cv_inference` and `api`.
+5. **Publishes** a `FrameMessage` to `video.frames`, keyed by camera.
+
+When a source fails, the worker logs it and retries with exponential backoff (`SOURCE_RETRY_*`); the other cameras keep running. A cleanup thread deletes frames older than `FRAME_RETENTION_MINUTES`, so consumers must handle a frame file that has already gone. Every `METRICS_LOG_INTERVAL_SECONDS`, each camera logs a health line:
+
+```
+health camera=cam-old-street state=streaming frames_read=897 frames_published=60 fps=2.00 errors=0
+```
+
+All settings are in `.env` (see `.env.example`).
+
+### Sample videos
+
+```powershell
+python scripts\download_sample_videos.py
+```
+
+The script downloads one openly licensed traffic video per demo camera from Wikimedia Commons into `data/videos/`. It uses the 480p versions, a few MB each, and points each camera's `stream_url` at its file. Licence and author are read from the Commons API, printed, and saved to `data/videos/ATTRIBUTION.md`. If a download fails, the script generates a synthetic video instead, so the pipeline still runs.
+
+| Camera | Commons file | Licence | Author |
+| --- | --- | --- | --- |
+| `cam-hyde-park-corner` | London roundabout.ogg | CC BY-SA 4.0 | Vcohen |
+| `cam-trafalgar-square` | Intersection Pie-IX-Sherbrooke.webm | CC BY-SA 4.0 | Thomas1313 |
+| `cam-elephant-castle` | Road traffic on Stritarjeva street.webm | CC BY 3.0 | Sounds of Changes |
+| `cam-old-street` | A intersection with traffic in Chiang Mai, Thailand.ogv | CC BY-SA 4.0 | Amada44 |
+
+If you redistribute these videos or anything derived from them, credit the author and keep the licence (CC BY-SA also requires sharing derivatives under the same licence).
+
+Options: `--force` (re-download), `--synthetic-only`, `--skip-db`.
+
+### Watching frames
+
+- **Kafka UI:** <http://localhost:8080/ui/clusters/traffic-intel/all-topics/video.frames/messages>
+- **Console consumer:**
+
+```powershell
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic video.frames --max-messages 5 --property print.key=true --property print.headers=true
+```
+
 ## Repository layout
 
 ```
@@ -131,7 +179,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e "shared[dev]"
+pip install -e "shared[dev]" -r services\video_ingest\requirements.txt
 ```
 
 ### Database migrations
@@ -163,8 +211,10 @@ ruff check .
 | `test_messaging.py` | Kafka | Producer validation and keys, consumer commits, retries, dead-lettering, shutdown |
 | `test_migrations.py` | Postgres | Upgrade, downgrade and upgrade again; models match the migration; constraints; idempotent seed |
 | `test_skeleton.py` | nothing | Settings, logging, lifecycle, service layout |
+| `test_video_ingest.py` | nothing | Frame sampling, resizing, JPEG encoding, stream_url parsing, file naming, retention, health metrics |
+| `test_video_ingest_integration.py` | Kafka | A worker on a short synthetic video publishes to `video.frames`, plus retry when a source is missing |
 
-Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards; they never touch `traffic` or the platform topics.
+Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. The one exception on Kafka is the video_ingest integration test: it publishes a few dozen frames to the real `video.frames` topic under a `test-cam-<id>` camera id. Those messages stay until Kafka retention removes them, and their frame files no longer exist.
 
 On Windows, Smart App Control can block confluent-kafka's native library, so `import confluent_kafka` fails and the Kafka tests skip under `-Local`. The default `test.ps1` mode runs in Linux and isn't affected.
 

@@ -29,7 +29,10 @@ services:
     <<: *python-service
     build: { context: ., dockerfile: services/video_ingest/Dockerfile }
     volumes:
-      - ./data:/data
+      - ./data/videos:/data/videos:ro   # sample/source videos (scripts/download_sample_videos.py)
+      - frames:/data/frames             # sampled JPEGs, shared with cv_inference and api
+    # Workers may be blocked up to SOURCE_TIMEOUT_SECONDS (10 s) in a stream read.
+    stop_grace_period: 20s
 
   event_simulator:
     <<: *python-service
@@ -40,6 +43,7 @@ services:
     build: { context: ., dockerfile: services/cv_inference/Dockerfile }
     volumes:
       - ./models:/models:ro
+      - frames:/data/frames:ro
 
   nlp_service:
     <<: *python-service
@@ -66,6 +70,8 @@ services:
     build: { context: ., dockerfile: services/api/Dockerfile }
     ports:
       - "${API_PORT:-8001}:8000"
+    volumes:
+      - frames:/data/frames:ro
 
   dashboard:
     build: { context: ./dashboard }
@@ -228,6 +234,7 @@ networks:
   traffic:
 
 volumes:
+  frames:
   kafka_data:
   postgres_data:
   mlflow_artifacts:

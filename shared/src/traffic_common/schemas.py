@@ -64,21 +64,22 @@ class _Window(BaseModel):
 
 
 class FrameMessage(KafkaMessage):
-    """A captured frame. Large images should travel by reference (``image_uri``)."""
+    """A sampled frame, stored as an image file on the shared frames volume.
+
+    ``timestamp`` is the capture time. ``frame_path`` is the path inside containers
+    (``/data/frames/<camera_id>/<timestamp>.jpg``); files are deleted after the ingest
+    service's retention window, so consumers must tolerate a missing file.
+    ``sequence`` counts published frames per camera and restarts at 0 when video_ingest restarts.
+    """
 
     camera_id: CameraId
-    frame_index: int = Field(ge=0)
+    frame_id: UUID = Field(default_factory=uuid4)
+    sequence: int = Field(ge=0)
+    frame_path: str = Field(min_length=1, max_length=500)
     width: int = Field(gt=0)
     height: int = Field(gt=0)
-    encoding: Literal["jpeg", "png", "raw"] = "jpeg"
-    image_uri: str | None = None
-    image_b64: str | None = None
-
-    @model_validator(mode="after")
-    def _exactly_one_image(self) -> Self:
-        if (self.image_uri is None) == (self.image_b64 is None):
-            raise ValueError("set exactly one of image_uri or image_b64")
-        return self
+    source_fps: float = Field(gt=0)
+    encoding: Literal["jpeg", "png"] = "jpeg"
 
 
 class BoundingBox(BaseModel):
@@ -108,10 +109,10 @@ class DetectedObject(BaseModel):
 
 
 class Detection(KafkaMessage):
-    """All objects detected in one frame."""
+    """All objects detected in one frame (``frame_id`` from the FrameMessage)."""
 
     camera_id: CameraId
-    frame_index: int = Field(ge=0)
+    frame_id: UUID
     model_name: ShortStr
     model_version: ShortStr
     objects: list[DetectedObject] = Field(default_factory=list)
