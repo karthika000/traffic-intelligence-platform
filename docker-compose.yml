@@ -206,6 +206,24 @@ services:
     restart: unless-stopped
     networks: [traffic]
 
+  # ------------------------------------------------------------------- test runner
+  # Not started by `up`. Run with .\scripts\test.ps1 (docker compose --profile test run --rm tests).
+  tests:
+    profiles: [test]
+    build: { context: ., dockerfile: tests/Dockerfile }
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./:/repo
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks: [traffic]
+
 networks:
   traffic:
 

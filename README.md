@@ -49,7 +49,7 @@ Kafka has two listeners:
 
 ### Kafka topics
 
-Created by `scripts/create_topics.ps1`, which `up.ps1` runs once Kafka is healthy. Each topic gets 3 partitions and replication factor 1. Automatic topic creation is disabled, so a misspelled topic name fails instead of silently creating a new topic.
+Created by `scripts/create_topics.ps1`, which `up.ps1` runs once Kafka is healthy. Each data topic gets 3 partitions and replication factor 1. Automatic topic creation is disabled, so a misspelled topic name fails instead of silently creating a new topic. Each topic has a Pydantic schema in `traffic_common.schemas` (see [shared/README.md](shared/README.md)).
 
 | Topic | Carries |
 | --- | --- |
@@ -62,19 +62,29 @@ Created by `scripts/create_topics.ps1`, which `up.ps1` runs once Kafka is health
 | `nlp.results` | Entities and intents extracted by `nlp_service` |
 | `incidents` | Fused incidents from `fusion_service` |
 | `summaries` | Text from `summarizer` |
+| `drift.alerts` | Model drift alerts from `ml/monitoring` |
+
+There is also one dead-letter topic per consumer group, `dlq.<group>`:
+
+- **Topics:** `dlq.cv-inference`, `dlq.nlp-service`, `dlq.anomaly-service`, `dlq.fusion-service`, `dlq.summarizer`, `dlq.api`, `dlq.ml-monitoring`. Each has 1 partition and keeps messages for 14 days.
+- **What lands there:** messages that fail validation, or that still fail after retries.
+- **Inspecting them:** browse them in Kafka UI. Each record carries `dlq.*` headers explaining why it failed.
+
+`create_topics.ps1` prints a Kafka warning for every topic with a `.` in its name. It's harmless: the warning is about topics that differ only by `.` versus `_`, and none of ours do.
 
 ## Repository layout
 
 ```
 services/<name>/     main.py, Dockerfile, requirements.txt per service
-shared/              traffic-common Python package used by all services
+shared/              traffic-common package: settings, Kafka schemas + clients, DB models + migrations
 dashboard/           React + Vite + TypeScript frontend
 ml/                  training/, evaluation/, monitoring/
 data/                local datasets and sample videos (git-ignored)
 models/              trained model artifacts (git-ignored, mounted read-only)
-tests/               repository-level tests
+tests/               repository-level tests (+ Dockerfile for the in-Docker test runner)
 infra/               MLflow image, Postgres init scripts
-scripts/             PowerShell helpers (up / down / logs / create_topics)
+scripts/             PowerShell helpers (up / down / logs / create_topics / test)
+ruff.toml            lint settings for the whole repo
 ```
 
 ## Prerequisites (Windows)
@@ -106,6 +116,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 | `down.ps1` | `-Volumes` |
 | `logs.ps1` | `-Services a,b` · `-Tail N` · `-NoFollow` |
 | `create_topics.ps1` | `-Partitions N` (new topics only) · `-TimeoutSec N` |
+| `test.ps1` | `-Local` · any pytest arguments (`-k`, `-x`, paths, ...) |
 
 | Open | URL |
 | --- | --- |
@@ -121,8 +132,41 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e "shared[dev]"
-pytest
 ```
+
+### Database migrations
+
+Run these with the stack up. They use `POSTGRES_URL`, which defaults to `localhost:5432`:
+
+```powershell
+python -m traffic_common.db upgrade                            # apply all migrations
+python -m traffic_common.db seed                               # 4 demo cameras (safe to re-run)
+python -m traffic_common.db current                            # show the applied revision
+python -m traffic_common.db downgrade -1                       # roll back one revision
+python -m traffic_common.db revision -m "add x" --autogenerate # new migration from model changes
+```
+
+The same commands work inside any service container, for example `docker compose exec api python -m traffic_common.db upgrade`. See [shared/README.md](shared/README.md) for the models and the Kafka helpers.
+
+### Tests and lint
+
+```powershell
+.\scripts\test.ps1                          # whole suite in a Linux container on the compose network
+.\scripts\test.ps1 tests/test_schemas.py -x # any pytest arguments pass through
+.\scripts\test.ps1 -Local                   # in .venv against localhost:9092 / localhost:5432
+ruff check .
+```
+
+| File | Needs | What it covers |
+| --- | --- | --- |
+| `test_schemas.py` | nothing | Schema round-trips, validation rules, and the topic lists in `create_topics.ps1` |
+| `test_messaging.py` | Kafka | Producer validation and keys, consumer commits, retries, dead-lettering, shutdown |
+| `test_migrations.py` | Postgres | Upgrade, downgrade and upgrade again; models match the migration; constraints; idempotent seed |
+| `test_skeleton.py` | nothing | Settings, logging, lifecycle, service layout |
+
+Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards; they never touch `traffic` or the platform topics.
+
+On Windows, Smart App Control can block confluent-kafka's native library, so `import confluent_kafka` fails and the Kafka tests skip under `-Local`. The default `test.ps1` mode runs in Linux and isn't affected.
 
 Run one service outside Docker: `python services\api\main.py`. Outside Docker, `traffic_common.get_settings()` defaults to the host-side addresses (`localhost:9092`, Postgres on `localhost:5432`, MLflow on `http://localhost:5000`), so a local process talks to the infrastructure running in Docker.
 

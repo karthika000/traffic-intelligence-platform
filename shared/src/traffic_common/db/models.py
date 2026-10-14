@@ -1,0 +1,367 @@
+"""SQLAlchemy 2.0 models for the `traffic` database.
+
+Rows that originate from a Kafka message keep its UUID (``id`` or ``message_id``) so
+ingestion can be made idempotent with ON CONFLICT DO NOTHING.
+All timestamps are timezone-aware (TIMESTAMPTZ). Enums are stored as strings with CHECK
+constraints rather than native PostgreSQL enums, so adding a value is a simple migration.
+"""
+
+import uuid
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Double,
+    Enum,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from traffic_common.enums import (
+    DriftType,
+    EvidenceType,
+    IncidentStatus,
+    ModelStage,
+    ReportSource,
+    Severity,
+    SummaryScope,
+)
+
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    type_annotation_map = {
+        datetime: DateTime(timezone=True),
+        dict[str, Any]: JSONB,
+        list[dict[str, Any]]: JSONB,
+        str: String(200),
+        float: Double,
+    }
+
+
+def _enum(enum_cls: type[StrEnum], name: str) -> Enum:
+    return Enum(
+        enum_cls,
+        name=name,
+        native_enum=False,
+        create_constraint=True,
+        length=20,
+        values_callable=lambda e: [m.value for m in e],
+        validate_strings=True,
+    )
+
+
+def _pk() -> Mapped[int]:
+    return mapped_column(BigInteger, Identity(), primary_key=True)
+
+
+def _created_at() -> Mapped[datetime]:
+    return mapped_column(server_default=func.now())
+
+
+def _camera_fk(nullable: bool = False) -> Mapped[Any]:
+    return mapped_column(String(64), ForeignKey("cameras.id"), nullable=nullable)
+
+
+def _empty_json() -> Any:
+    return text("'{}'::jsonb")
+
+
+class Camera(Base):
+    __tablename__ = "cameras"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str]
+    location_name: Mapped[str]
+    latitude: Mapped[float]
+    longitude: Mapped[float]
+    stream_url: Mapped[str] = mapped_column(String(500))
+    zone_config: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint("latitude BETWEEN -90 AND 90", name="latitude_range"),
+        CheckConstraint("longitude BETWEEN -180 AND 180", name="longitude_range"),
+    )
+
+
+class TrafficMetric(Base):
+    __tablename__ = "traffic_metrics"
+
+    id: Mapped[int] = _pk()
+    message_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
+    camera_id: Mapped[str] = _camera_fk()
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    vehicle_count: Mapped[int] = mapped_column(Integer)
+    avg_speed_kmh: Mapped[float | None]
+    occupancy: Mapped[float | None]
+    counts_by_class: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint("window_end > window_start", name="window_ordered"),
+        CheckConstraint("vehicle_count >= 0", name="vehicle_count_non_negative"),
+        CheckConstraint("occupancy IS NULL OR occupancy BETWEEN 0 AND 1", name="occupancy_range"),
+        Index("ix_traffic_metrics_camera_id_window_start", "camera_id", "window_start"),
+        Index("ix_traffic_metrics_window_start", "window_start"),
+    )
+
+
+class DetectionAggregate(Base):
+    """Per-camera, per-class object counts over a time window."""
+
+    __tablename__ = "detection_aggregates"
+
+    id: Mapped[int] = _pk()
+    camera_id: Mapped[str] = _camera_fk()
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    object_class: Mapped[str] = mapped_column(String(50))
+    object_count: Mapped[int] = mapped_column(Integer)
+    avg_confidence: Mapped[float | None]
+    model_name: Mapped[str]
+    model_version: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint("window_end > window_start", name="window_ordered"),
+        CheckConstraint("object_count >= 0", name="object_count_non_negative"),
+        # Explicit name: the generated one would exceed PostgreSQL's 63-character identifier limit.
+        UniqueConstraint(
+            "camera_id", "window_start", "object_class", "model_name", "model_version",
+            name="uq_detection_aggregates_window_class_model",
+        ),
+        Index("ix_detection_aggregates_camera_id_window_start", "camera_id", "window_start"),
+        Index("ix_detection_aggregates_window_start", "window_start"),
+    )
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # TextReport.report_id
+    source: Mapped[ReportSource] = mapped_column(_enum(ReportSource, "report_source"))
+    text: Mapped[str] = mapped_column(Text)
+    camera_id: Mapped[str | None] = _camera_fk(nullable=True)
+    location_name: Mapped[str | None]
+    latitude: Mapped[float | None]
+    longitude: Mapped[float | None]
+    reported_at: Mapped[datetime]
+    received_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        Index("ix_reports_camera_id_reported_at", "camera_id", "reported_at"),
+        Index("ix_reports_reported_at", "reported_at"),
+    )
+
+
+class NlpResult(Base):
+    __tablename__ = "nlp_results"
+
+    id: Mapped[int] = _pk()
+    message_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
+    report_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reports.id", ondelete="CASCADE"))
+    camera_id: Mapped[str | None] = _camera_fk(nullable=True)
+    category: Mapped[str] = mapped_column(String(50))
+    severity: Mapped[Severity | None] = mapped_column(_enum(Severity, "severity"))
+    sentiment: Mapped[float | None]
+    location_name: Mapped[str | None]
+    entities: Mapped[list[dict[str, Any]]] = mapped_column(server_default=text("'[]'::jsonb"))
+    model_name: Mapped[str]
+    model_version: Mapped[str] = mapped_column(String(100))
+    processed_at: Mapped[datetime]
+
+    __table_args__ = (
+        CheckConstraint("sentiment IS NULL OR sentiment BETWEEN -1 AND 1", name="sentiment_range"),
+        Index("ix_nlp_results_report_id", "report_id"),
+        Index("ix_nlp_results_camera_id_processed_at", "camera_id", "processed_at"),
+        Index("ix_nlp_results_processed_at", "processed_at"),
+    )
+
+
+class Anomaly(Base):
+    __tablename__ = "anomalies"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # Anomaly.anomaly_id
+    camera_id: Mapped[str] = _camera_fk()
+    anomaly_type: Mapped[str] = mapped_column(String(50))
+    metric_name: Mapped[str] = mapped_column(String(100))
+    observed_value: Mapped[float]
+    expected_value: Mapped[float | None]
+    score: Mapped[float]
+    threshold: Mapped[float]
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    detected_at: Mapped[datetime]
+    model_name: Mapped[str]
+    model_version: Mapped[str] = mapped_column(String(100))
+    details: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+
+    __table_args__ = (
+        CheckConstraint("window_end > window_start", name="window_ordered"),
+        Index("ix_anomalies_camera_id_detected_at", "camera_id", "detected_at"),
+        Index("ix_anomalies_detected_at", "detected_at"),
+    )
+
+
+class Incident(Base):
+    __tablename__ = "incidents"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # Incident.incident_id
+    camera_id: Mapped[str] = _camera_fk()
+    status: Mapped[IncidentStatus] = mapped_column(
+        _enum(IncidentStatus, "incident_status"), server_default=IncidentStatus.SUSPECTED.value
+    )
+    severity: Mapped[Severity] = mapped_column(_enum(Severity, "severity"))
+    fused_confidence: Mapped[float]
+    start_time: Mapped[datetime]
+    end_time: Mapped[datetime | None]
+    title: Mapped[str]
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    evidence: Mapped[list["IncidentEvidence"]] = relationship(
+        back_populates="incident", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("fused_confidence BETWEEN 0 AND 1", name="fused_confidence_range"),
+        CheckConstraint("end_time IS NULL OR end_time >= start_time", name="time_ordered"),
+        CheckConstraint(
+            "status <> 'resolved' OR end_time IS NOT NULL", name="resolved_has_end_time"
+        ),
+        Index("ix_incidents_camera_id_start_time", "camera_id", "start_time"),
+        Index("ix_incidents_start_time", "start_time"),
+        Index("ix_incidents_status", "status"),
+    )
+
+
+class IncidentEvidence(Base):
+    """Links an incident to exactly one supporting traffic metric, anomaly or report."""
+
+    __tablename__ = "incident_evidence"
+
+    id: Mapped[int] = _pk()
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"))
+    evidence_type: Mapped[EvidenceType] = mapped_column(_enum(EvidenceType, "evidence_type"))
+    traffic_metric_id: Mapped[int | None] = mapped_column(
+        ForeignKey("traffic_metrics.id", ondelete="CASCADE")
+    )
+    anomaly_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("anomalies.id", ondelete="CASCADE")
+    )
+    report_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("reports.id", ondelete="CASCADE")
+    )
+    weight: Mapped[float | None]  # contribution to the incident's fused confidence
+    created_at: Mapped[datetime] = _created_at()
+
+    incident: Mapped[Incident] = relationship(back_populates="evidence")
+
+    __table_args__ = (
+        CheckConstraint(
+            "(evidence_type = 'metric' AND traffic_metric_id IS NOT NULL"
+            " AND anomaly_id IS NULL AND report_id IS NULL)"
+            " OR (evidence_type = 'anomaly' AND anomaly_id IS NOT NULL"
+            " AND traffic_metric_id IS NULL AND report_id IS NULL)"
+            " OR (evidence_type = 'report' AND report_id IS NOT NULL"
+            " AND traffic_metric_id IS NULL AND anomaly_id IS NULL)",
+            name="exactly_one_target",
+        ),
+        CheckConstraint("weight IS NULL OR weight BETWEEN 0 AND 1", name="weight_range"),
+        Index("ix_incident_evidence_incident_id", "incident_id"),
+        Index("ix_incident_evidence_traffic_metric_id", "traffic_metric_id"),
+        Index("ix_incident_evidence_anomaly_id", "anomaly_id"),
+        Index("ix_incident_evidence_report_id", "report_id"),
+    )
+
+
+class Summary(Base):
+    __tablename__ = "summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # Summary.summary_id
+    scope: Mapped[SummaryScope] = mapped_column(_enum(SummaryScope, "summary_scope"))
+    camera_id: Mapped[str | None] = _camera_fk(nullable=True)
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL")
+    )
+    period_start: Mapped[datetime]
+    period_end: Mapped[datetime]
+    text: Mapped[str] = mapped_column(Text)
+    model_name: Mapped[str]
+    model_version: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint("period_end > period_start", name="period_ordered"),
+        Index("ix_summaries_camera_id_created_at", "camera_id", "created_at"),
+        Index("ix_summaries_incident_id", "incident_id"),
+        Index("ix_summaries_created_at", "created_at"),
+    )
+
+
+class ModelVersion(Base):
+    __tablename__ = "model_versions"
+
+    id: Mapped[int] = _pk()
+    model_name: Mapped[str]
+    version: Mapped[str] = mapped_column(String(100))
+    stage: Mapped[ModelStage] = mapped_column(
+        _enum(ModelStage, "model_stage"), server_default=ModelStage.NONE.value
+    )
+    mlflow_run_id: Mapped[str | None] = mapped_column(String(64))
+    metrics: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    registered_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (UniqueConstraint("model_name", "version"),)
+
+
+class DriftReport(Base):
+    __tablename__ = "drift_reports"
+
+    id: Mapped[int] = _pk()
+    model_name: Mapped[str]
+    model_version: Mapped[str] = mapped_column(String(100))
+    drift_type: Mapped[DriftType] = mapped_column(_enum(DriftType, "drift_type"))
+    metric: Mapped[str] = mapped_column(String(50))
+    feature: Mapped[str | None]
+    drift_score: Mapped[float]
+    threshold: Mapped[float]
+    is_drift: Mapped[bool]
+    camera_id: Mapped[str | None] = _camera_fk(nullable=True)
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    report: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint("window_end > window_start", name="window_ordered"),
+        Index("ix_drift_reports_model_name_created_at", "model_name", "created_at"),
+        Index("ix_drift_reports_camera_id_created_at", "camera_id", "created_at"),
+        Index("ix_drift_reports_created_at", "created_at"),
+    )

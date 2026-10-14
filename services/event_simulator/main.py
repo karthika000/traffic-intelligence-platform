@@ -1,6 +1,7 @@
 """Event Simulator service (placeholder).
 
-Generates synthetic traffic events (incidents, sensor readings, reports) for development and testing.
+Generates synthetic traffic events (incidents, sensor readings, reports)
+for development and testing.
 """
 
 from traffic_common import get_logger, get_settings, run_forever
