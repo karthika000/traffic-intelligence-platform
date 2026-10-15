@@ -15,7 +15,7 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class IngestConfig:
-    sample_fps: float = 2.0
+    sample_fps: float = 5.0  # enough overlap between frames for tracking in cv_inference
     max_width: int = 1280
     jpeg_quality: int = 85
     frames_dir: Path = Path("/data/frames")

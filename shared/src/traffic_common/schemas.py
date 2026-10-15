@@ -106,6 +106,10 @@ class DetectedObject(BaseModel):
     confidence: Probability
     bbox: BoundingBox
     track_id: int | None = Field(default=None, ge=0)
+    # Tracking analytics (cv_inference); None when the object isn't tracked yet.
+    speed_kmh: float | None = Field(default=None, ge=0)
+    stopped: bool = False  # vehicle below the stopped-speed threshold for long enough
+    in_roadway: bool | None = None  # ground point inside the camera's roadway polygon
 
 
 class Detection(KafkaMessage):
@@ -120,10 +124,24 @@ class Detection(KafkaMessage):
 
 
 class TrafficMetrics(_Window, KafkaMessage):
+    """Per-camera aggregates over a short window (cv_inference publishes one every 5 s).
+
+    Counts are unique tracks seen in the window: ``vehicle_count`` covers cars, trucks,
+    buses, motorcycles and bicycles; ``counts_by_class`` has every class including persons.
+    Speeds use one value per vehicle track (its mean speed in the window).
+    """
+
     camera_id: CameraId
     vehicle_count: int = Field(ge=0)
     avg_speed_kmh: float | None = Field(default=None, ge=0)
+    p85_speed_kmh: float | None = Field(default=None, ge=0)
     occupancy: Probability | None = None
+    density: float | None = Field(default=None, ge=0)  # mean vehicles inside the roadway per frame
+    stopped_vehicles: int = Field(default=0, ge=0)
+    pedestrians_in_roadway: int = Field(default=0, ge=0)
+    mean_confidence: Probability | None = None
+    frames: int = Field(default=0, ge=0)  # frames analysed in the window
+    model_version: ShortStr | None = None
     counts_by_class: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
 
 

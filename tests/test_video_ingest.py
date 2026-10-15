@@ -123,7 +123,7 @@ def test_resolve_source_rejects_bad_urls(url: str) -> None:
 
 
 def test_config_validation() -> None:
-    assert IngestConfig().sample_fps == 2.0
+    assert IngestConfig().sample_fps == 5.0
     with pytest.raises(ValueError):
         IngestConfig(jpeg_quality=0)
     with pytest.raises(ValueError):

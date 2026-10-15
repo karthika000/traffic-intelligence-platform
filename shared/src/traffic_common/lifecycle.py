@@ -6,6 +6,7 @@ SIGINT/SIGTERM set the shutdown event. Long-running loops (``run_forever``,
 """
 
 import logging
+import os
 import signal
 import threading
 from collections.abc import Callable
@@ -56,8 +57,15 @@ def install_signal_handlers(log: logging.Logger | None = None) -> None:
     if _handlers_installed or threading.current_thread() is not threading.main_thread():
         return
     log = log or _log
+    owner_pid = os.getpid()
 
     def _handle(signum: int, _frame: object) -> None:
+        if os.getpid() != owner_pid:
+            # A forked child (e.g. a library's worker process) inherited this handler:
+            # terminate it normally instead of logging a misleading shutdown.
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+            return
         log.info("received %s, shutting down", signal.Signals(signum).name)
         _shutdown.set()
 

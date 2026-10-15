@@ -1,4 +1,4 @@
-"""Migration tests against a throwaway database on the running Postgres server."""
+﻿"""Migration tests against a throwaway database on the running Postgres server."""
 
 import uuid
 from datetime import UTC, datetime
@@ -34,7 +34,7 @@ EXPECTED_TABLES = {
 
 def test_single_head_revision() -> None:
     heads = ScriptDirectory.from_config(alembic_config("postgresql://x@localhost/x")).get_heads()
-    assert heads == ["0002"]
+    assert heads == ["0003"]
 
 
 def test_upgrade_and_downgrade(scratch_database: str) -> None:
@@ -51,7 +51,7 @@ def test_upgrade_and_downgrade(scratch_database: str) -> None:
                 MigrationContext.configure(conn, opts={"compare_type": True}), Base.metadata
             )
             assert diff == []
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "0002"
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "0003"
 
         indexes = {i["name"] for i in insp.get_indexes("incidents")}
         assert {"ix_incidents_camera_id_start_time", "ix_incidents_start_time"} <= indexes
@@ -76,15 +76,24 @@ def test_seed_is_idempotent(scratch_database: str) -> None:
     engine = create_db_engine(scratch_database)
     try:
         assert seed_cameras(engine) == 4
-        assert seed_cameras(engine) == 4
+        with engine.begin() as conn:  # what the zone and video scripts would write
+            conn.execute(
+                text(
+                    "UPDATE cameras SET zone_config = '{\"pixels_per_metre\": 40}',"
+                    " stream_url = '/data/videos/custom.webm' WHERE id = 'cam-old-street'"
+                )
+            )
+        assert seed_cameras(engine) == 4  # re-seed
         with engine.connect() as conn:
             rows = conn.execute(
-                text("SELECT id, latitude, longitude, zone_config FROM cameras")
+                text("SELECT id, latitude, longitude, zone_config, stream_url FROM cameras")
             ).all()
         assert {r.id for r in rows} == {c["id"] for c in DEMO_CAMERAS}
         for r in rows:
             assert 51.4 < r.latitude < 51.6 and -0.2 < r.longitude < 0.0  # central London
-            assert r.zone_config["zones"] and r.zone_config["count_lines"]
+        old_street = next(r for r in rows if r.id == "cam-old-street")
+        assert old_street.zone_config == {"pixels_per_metre": 40}  # re-seed kept calibration
+        assert old_street.stream_url == "/data/videos/custom.webm"
     finally:
         engine.dispose()
 

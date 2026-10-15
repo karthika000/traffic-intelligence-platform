@@ -1,2 +1,13 @@
-# Service-specific dependencies for cv_inference.
+# Service-specific dependencies for cv_inference (CPU only).
 # traffic-common (shared/) is installed separately by the Dockerfile.
+# CPU-only PyTorch wheels (~200 MB instead of several GB of CUDA libraries).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+ultralytics==8.4.177
+# ByteTrack's assignment solver; Ultralytics would otherwise pip-install it at runtime.
+lap>=0.5.12
+openvino==2026.4.1
+# Matches the MLflow server version in infra/mlflow.
+mlflow-skinny==2.17.2
+opencv-python-headless>=4.10,<5

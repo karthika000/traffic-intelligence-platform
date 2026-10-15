@@ -122,6 +122,13 @@ class TrafficMetric(Base):
     avg_speed_kmh: Mapped[float | None]
     occupancy: Mapped[float | None]
     counts_by_class: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    p85_speed_kmh: Mapped[float | None]
+    density: Mapped[float | None]
+    stopped_vehicles: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pedestrians_in_roadway: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    mean_confidence: Mapped[float | None]
+    frames: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    model_version: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = _created_at()
 
     __table_args__ = (

@@ -46,6 +46,8 @@ services:
     volumes:
       - ./models:/models:ro
       - frames:/data/frames:ro
+      - annotated:/data/annotated   # latest annotated frame per camera
+      - weights:/weights            # YOLO weights, MLflow downloads, OpenVINO export cache
 
   nlp_service:
     <<: *python-service
@@ -74,6 +76,7 @@ services:
       - "${API_PORT:-8001}:8000"
     volumes:
       - frames:/data/frames:ro
+      - annotated:/data/annotated:ro
 
   dashboard:
     build: { context: ./dashboard }
@@ -225,6 +228,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - ./:/repo
+      - weights:/weights:ro   # reuse cv_inference's cached YOLO weights
     depends_on:
       kafka:
         condition: service_healthy
@@ -237,6 +241,8 @@ networks:
 
 volumes:
   frames:
+  annotated:
+  weights:
   kafka_data:
   postgres_data:
   mlflow_artifacts:

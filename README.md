@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest` and `event_simulator` are implemented. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator` and `cv_inference` are implemented. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -80,7 +80,7 @@ There is also one dead-letter topic per consumer group, `dlq.<group>`:
 For each camera it:
 
 1. **Reads** the source. `stream_url` can be a file under `/data/videos` (which maps to `./data/videos`), an `rtsp://` URL, or an `http(s)://` URL. Files play in real time and loop forever, simulating a live feed.
-2. **Samples** frames at `FRAME_SAMPLE_FPS`.
+2. **Samples** frames at `FRAME_SAMPLE_FPS` (default 5). Below that, vehicles move further than their own length between frames and cv_inference loses their tracks.
 3. **Resizes** frames to at most `FRAME_MAX_WIDTH`, keeping the aspect ratio, and JPEG-encodes them at `FRAME_JPEG_QUALITY`.
 4. **Writes** each frame to the shared `frames` volume as `/data/frames/<camera_id>/<timestamp>.jpg`. The volume is read-write for `video_ingest` and read-only for `cv_inference` and `api`.
 5. **Publishes** a `FrameMessage` to `video.frames`, keyed by camera.
@@ -112,6 +112,66 @@ Options: `--force` (re-download), `--synthetic-only`, `--skip-db`.
 
 ```powershell
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic video.frames --max-messages 5 --property print.key=true --property print.headers=true
+```
+
+## CV inference
+
+`cv_inference` consumes `video.frames` (consumer group `cv-inference`). It detects cars, trucks, buses, motorcycles, bicycles and people with YOLO26n, follows them with ByteTrack (one tracker per camera), and publishes:
+
+| Output | Where | When |
+| --- | --- | --- |
+| `Detection` | `detections` | One per processed frame: class, confidence, normalised box, track id, `speed_kmh`, `stopped`, `in_roadway` |
+| `TrafficMetrics` | `traffic.metrics` and the `traffic_metrics` table | Every `CV_METRICS_WINDOW_SECONDS` (5 s) per camera |
+| Annotated frame | `/data/annotated/<camera_id>/latest.jpg` on the `annotated` volume (read-only in `api`) | Every processed frame, replaced atomically |
+
+`TrafficMetrics` contains:
+
+- **Counts:** unique tracks per class and unique vehicles.
+- **Speeds:** average and 85th-percentile speed, one value per vehicle track.
+- **Density:** mean number of vehicles inside the roadway per frame.
+- **Incidents:** stopped vehicles and pedestrians inside the roadway. A person whose box mostly overlaps a detected bicycle or motorcycle counts as a rider, not a pedestrian.
+- **Quality:** mean detection confidence and frames analysed.
+
+**Keeping up in real time on CPU:**
+
+- Frames older than `CV_MAX_FRAME_AGE_SECONDS` (5 s) are skipped as stale.
+- Each camera keeps only its newest waiting frame; older ones are dropped and counted as `superseded`.
+- A frame whose file retention has already deleted is skipped with a debug log.
+- In all three cases the offset is still committed.
+
+Every 30 s each camera logs `processed`, `fps`, inference latency (mean and p95), capture-to-publish lag, and the stale, superseded, missing and error counts.
+
+### Model loading and the CPU backend
+
+At startup the service:
+
+1. Loads `vehicle-detector@champion` from the MLflow registry. On first run, it registers the pretrained `yolo26n.pt` as version 1 instead, logging the model name, input size and class list as run parameters.
+2. Caches the weights in the `weights` volume, so restarts don't download them again.
+3. Exports the model to OpenVINO once, also cached in the volume.
+4. Benchmarks PyTorch and OpenVINO on a real frame and logs both latencies. `CV_BACKEND` picks the backend: `openvino` (default), `pytorch`, or `auto` for whichever is faster. If the export fails, it falls back to PyTorch.
+5. Records the version in use, with the latency figures, in `model_versions`.
+
+Inference uses `CV_THREADS` threads, which defaults to half the cores, at most 6. Inside the Docker VM all vCPUs look the same, so using every core puts work on efficiency cores and next to video decoding. On a Core Ultra 5 225H, 14 threads were about 80× slower than 6. OpenVINO is recompiled without CPU pinning for the same reason, which took it from 31 ms to 19 ms per frame. PyTorch is CPU-only (the `whl/cpu` wheels).
+
+### Zones and speed
+
+Each camera's `zone_config` holds a `roadway` polygon (normalised coordinates) and a `pixels_per_metre` scale. It can also hold `pixels_per_metre_y` for traffic moving towards the camera, plus the `reference_width` the scales were measured at. Without a config, the whole frame is the roadway and the frame is taken to be `CV_DEFAULT_FRAME_WIDTH_METRES` (30 m) wide.
+
+```powershell
+python scripts\write_zone_configs.py                       # calibrated defaults for the 4 demo cameras
+python scripts\write_zone_configs.py --preview data\zone_previews   # draw them on video frames to check
+```
+
+cv_inference re-reads zone configs every `CAMERA_REFRESH_SECONDS`, so no restart is needed. How each value is computed:
+
+- **Speed:** ground-point displacement (bottom centre of the box) over the last 2 s, smoothed.
+- **Stopped:** speed below `CV_STOPPED_SPEED_KMH` (3) for `CV_STOPPED_AFTER_SECONDS` (5).
+- **Accuracy:** a single scale ignores perspective, so speeds are approximate. They are most accurate where vehicles cross the area the scale was measured in.
+
+### Viewing annotated frames
+
+```powershell
+docker compose cp cv_inference:/data/annotated/cam-hyde-park-corner/latest.jpg $env:TEMP\annotated.jpg; Invoke-Item $env:TEMP\annotated.jpg
 ```
 
 ## Event simulator
@@ -270,16 +330,19 @@ ruff check .
 | `test_video_ingest.py` | nothing | Frame sampling, resizing, JPEG encoding, stream_url parsing, file naming, retention, health metrics |
 | `test_video_ingest_integration.py` | Kafka | A worker on a short synthetic video publishes to `video.frames`, plus retry when a source is missing |
 | `test_event_simulator.py` | nothing | Report variety and label correctness, train/test holdout separation, dataset files, daily traffic pattern, weather, scenario YAML parsing and timelines, scenario runs, control commands |
+| `test_cv_inference.py` | nothing | Zones (point-in-polygon, scaling, defaults), speed and smoothing, stopped detection, metric windows, latest-frame scheduling, message building |
+| `test_cv_inference_integration.py` | Ultralytics (+ Kafka) | YOLO26n + ByteTrack on 12 frames of a sample video produce valid, tracked `Detection`s and metrics; the messages round-trip through `detections` |
 | `test_event_simulator_integration.py` | Kafka + Postgres | A scenario triggered through `simulator.control` emits tagged messages on `reports.text` and `events.raw`, and its ground truth lands in `scenario_runs` and `simulated_reports` |
 
-Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. Two integration tests do publish to real topics:
+Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. Three integration tests do publish to real topics:
 
 - **video_ingest:** a few dozen frames on `video.frames`, under a `test-cam-<id>` camera id. Their frame files no longer exist.
+- **cv_inference:** 4 `Detection`s on `detections` under a `test-cam-<id>` camera id.
 - **event_simulator:** a scenario's reports and events on `reports.text` and `events.raw`, tagged with a `test-cam-<id>` camera and that run's `scenario_id`. The live simulator also receives the test's control command and logs `rejected start_scenario … unknown camera`, as intended.
 
 Those messages stay until Kafka retention removes them.
 
-On Windows, Smart App Control can block confluent-kafka's native library, so `import confluent_kafka` fails and the Kafka tests skip under `-Local`. The default `test.ps1` mode runs in Linux and isn't affected.
+On Windows, Smart App Control can block confluent-kafka's native library, so `import confluent_kafka` fails and the Kafka tests skip under `-Local`. The cv_inference integration test also skips under `-Local`, because PyTorch and Ultralytics are only installed in the Docker images. The default `test.ps1` mode runs in Linux and runs everything.
 
 Run one service outside Docker: `python services\api\main.py`. Outside Docker, `traffic_common.get_settings()` defaults to the host-side addresses (`localhost:9092`, Postgres on `localhost:5432`, MLflow on `http://localhost:5000`), so a local process talks to the infrastructure running in Docker.
 
