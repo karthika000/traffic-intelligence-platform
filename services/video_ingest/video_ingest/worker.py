@@ -144,4 +144,3 @@ class CameraWorker(threading.Thread):
             return
         self.sequence += 1
         self.metrics.frame_published()
-

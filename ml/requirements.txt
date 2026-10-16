@@ -1,0 +1,4 @@
+# Training extras on top of the model runtime (ml-trainer image).
+-r requirements-runtime.txt
+pyarrow==26.0.0
+matplotlib>=3.9,<4

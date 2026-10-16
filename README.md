@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator` and `cv_inference` are implemented. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference` and `anomaly_service` are implemented, with trained congestion and anomaly models. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -174,6 +174,116 @@ cv_inference re-reads zone configs every `CAMERA_REFRESH_SECONDS`, so no restart
 docker compose cp cv_inference:/data/annotated/cam-hyde-park-corner/latest.jpg $env:TEMP\annotated.jpg; Invoke-Item $env:TEMP\annotated.jpg
 ```
 
+## Congestion and anomaly models
+
+All training runs in Docker, in the `ml-trainer` service. It uses the same CPU-only PyTorch wheels as cv_inference, only starts on demand, and mounts `ml/` and `data/`:
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.training.train_congestion
+docker compose run --rm ml-trainer python -m ml.training.train_anomaly
+docker compose run --rm ml-trainer python -m ml.data.build --no-real      # just build a dataset
+```
+
+Both training commands accept these options:
+
+| Option | Effect |
+| --- | --- |
+| `--real-hours N` | Use only the last N hours of real data |
+| `--no-real` | Train on synthetic data only |
+| `--synthetic-days N` | How much synthetic data to generate |
+| `--seed N` | Random seed |
+| `--no-promote` | Train and log, but don't register the model or move `@champion` |
+
+`train_anomaly` also takes `--epochs`, `--threshold-percentile` and `--score-method`.
+
+### Data
+
+Datasets are written as versioned parquet under `data/ml/<name>/<UTC time>-<hash>/`, with a `stats.json`. The version, SHA-256 and stats are logged to each MLflow run. Every row records where it came from:
+
+- **Real (`origin=real`):** `traffic_metrics` rows, each joined with the latest loop-detector reading for the same camera at or before the window end (within 30 s). anomaly_service stores those readings from `events.raw` in `sensor_readings`.
+  - **Congestion labels** are *weak*: thresholds on speed relative to the camera's free-flow speed, density relative to its median, and stopped vehicles (`ml/labels.py`).
+  - **Scenario windows** from `scenario_runs` are anomalies during the active phases. The final, resolution phase is excluded from training.
+- **Synthetic (`origin=synthetic`):** per-camera series with daily patterns and injected episodes, each with ground truth (`ml/data/synthetic.py`). The episodes are:
+  - an incident: sudden speed drop, stopped vehicles and a density spike;
+  - a gradual congestion build-up;
+  - a sensor dropout;
+  - a camera failure, where detection confidence collapses;
+  - pedestrians in the road.
+
+### Congestion classifier
+
+The classifier predicts `free_flow`, `moderate`, `heavy` or `standstill` from engineered window features: current values plus rolling statistics over the last minute (`ml/features.py`). Two models are compared on a time-based split per camera:
+
+- **Gradient boosting baseline** (scikit-learn `HistGradientBoostingClassifier`);
+- **Small PyTorch MLP.**
+
+Each is a child run in the MLflow experiment `congestion-classifier`, which records parameters, per-class precision, recall and F1, a confusion matrix, and permutation feature importance. The model with the higher test macro-F1 is registered as `congestion-classifier` with alias `champion`.
+
+### Anomaly detector
+
+The detector is an LSTM autoencoder over 12 windows of 5 s per camera, trained on normal periods only. Its inputs are measured against the camera's own recent past:
+
+- **Relative inputs:** speeds, counts, density, occupancy and frames are each divided by the camera's rolling 10-minute median, which excludes the most recent minute.
+- **Absolute inputs:** stopped vehicles, pedestrians, detection confidence and the presence flags.
+- **Normalisation:** per camera.
+
+Absolute levels and time of day would make the daily pattern and slow drift look abnormal, especially with less than a day of real history.
+
+The score is the larger of two parts. Contributions in the `Anomaly` message are keyed `reconstruction:<feature>` or `level:<feature>`, and `details.fired_by` says which part produced the score.
+
+- **Reconstruction:** the largest per-feature reconstruction error over the last 3 windows. Each feature's error is divided by the 99th percentile of that feature's error on normal data for the camera, so a break in one smooth channel such as loop speed isn't drowned out by noisy ones. This part catches sudden changes.
+- **Level (distance from normal):** how far each relative feature is from 1, and how far stopped vehicles and pedestrians exceed their baseline. Each distance is divided by its own normal 99th percentile and multiplied by `--level-weight` (default 1; 0 turns it off). This part keeps scoring a *sustained* deviation, which the autoencoder alone reconstructs too well and stops flagging. `frames` (frames processed per window) is a pipeline-health signal, not traffic, so it has no level term and its baseline is never frozen; otherwise a lasting dip in processing throughput would raise, and hold open, an alert on every camera at once.
+
+Thresholds are per camera: the 99.5th percentile of the combined score on normal validation data, with a global fallback. The model also accepts an optional input column `baseline_<column>` for every baselined column. Where set, it replaces the rolling baseline, which is how anomaly_service freezes baselines during an alert.
+
+The run is evaluated two ways, using the service's own alarm rules (`ml/alarm.py`):
+
+- **Synthetic incident episodes:** recall, precision, detection delay and false alarms per hour, overall and per episode type.
+- **Real scenario runs:** whether an alarm fired during each run's active phases, and how fast.
+
+Everything is logged to the MLflow experiment `traffic-anomaly-detector`, and the model is registered as `traffic-anomaly-detector` with alias `champion`.
+
+Both models are MLflow **pyfunc** models. They take raw rows (one per camera per 5 s window) and compute features themselves. The per-camera references, normalisation, error scales and thresholds are stored inside the model, and the `ml` package is bundled through `code_paths`, so serving can't drift from training.
+
+## Model limitations
+
+- **The congestion classifier learns rules, not ground truth.** Its labels are derived by rule. Real data gets weak labels from thresholds on speed ratio, density ratio and stopped vehicles (`ml/labels.py`), and synthetic data is labelled by the same rule applied to the generator's noise-free state. Its near-perfect test scores (macro-F1 about 0.99) mostly show that it reproduces that rule. They are not evidence of accuracy against human-labelled traffic states, and there is no such evaluation yet.
+- **Real data is short and partly synthetic.** It covers about a day. The camera metrics come from looped sample videos, and the loop-detector readings come from the event simulator. Simulated incidents therefore show up only in the sensor channel, never in the video.
+- **The anomaly baseline is short-term.** The detector compares each camera with its own last ~10 minutes, frozen while an alert is active. It doesn't know what is normal for the time of day. A slowdown that builds over more than about 10 minutes, or an incident during an already-congested peak, is detected late or not at all; the evening-peak scenario runs were mostly missed.
+- **A time-of-day baseline is planned** once more real data exists, ideally several weeks per camera, so each camera can be compared with its usual traffic at that hour and weekday.
+- **Camera artefacts cause false alarms.** Elephant & Castle's parked vans flicker in and out of "stopped" and cause most real false alarms (about 2 per camera-hour overall). Per-camera zone configs that exclude parking areas would reduce that.
+
+## Anomaly service
+
+`anomaly_service` consumes `traffic.metrics` and `events.raw` (consumer group `anomaly-service`):
+
+- **Sensor readings:** loop-detector readings are stored in `sensor_readings`. A new consumer group starts from the earliest offset, so it backfills the history.
+- **Rolling window:** each metrics window is joined with the latest reading and added to the camera's rolling 12-minute history. Replayed history older than 60 s isn't scored.
+- **Scoring:** every 5 s each camera's history goes through both champion models. The congestion level, score and threshold are written to `camera_congestion`.
+- **Alerts:** an alert *starts* after `ANOMALY_MIN_CONSECUTIVE` (2) checks at or above the camera's threshold.
+  - **Frozen baseline:** when an alert starts, the camera's baselines (10-minute medians ending a minute earlier) are frozen. Until the alert ends, the model receives them as `baseline_<column>` inputs, so a long incident doesn't become the new normal.
+  - **Hold rule:** the alert stays open while loop or camera speed (mean of the last 3 windows) is below `ANOMALY_HOLD_SPEED_RATIO` (0.6) × the frozen baseline, or stopped vehicles exceed it by more than `ANOMALY_HOLD_STOPPED_MARGIN` (1). The hold lasts at most `ANOMALY_MAX_HOLD_SECONDS` (1800).
+  - **End:** once the hold is off, the alert ends after `ANOMALY_CLEAR_AFTER` (3) checks below `ANOMALY_CLEAR_RATIO` (0.8) × threshold. A new alert can't start until `ANOMALY_COOLDOWN_SECONDS` (120) after the last one ended.
+  - **Severity:** comes from the episode's peak score ÷ threshold, using `ANOMALY_SEVERITY_BOUNDS` (`2,4,8`): below 2× is low, then medium, high, critical.
+  - **Updates:** an `update` event is published when severity rises or a new hint appears, at most every `ANOMALY_UPDATE_MIN_SECONDS` (15), so downstream services see escalation.
+- **System-wide degradation:** each check, every camera's frames and detection confidence (mean of the last 3 windows) are compared with its baseline (the same ~10-minute median as the anomaly features).
+  - **Start:** when at least `ANOMALY_SYSTEM_MIN_CAMERAS` (3) cameras drop in the same check, the cause is taken to be the pipeline (cv_inference overloaded, a host or network problem), not traffic. A drop means frames below `ANOMALY_SYSTEM_FRAMES_RATIO` (0.85) × baseline, or confidence below `ANOMALY_SYSTEM_CONFIDENCE_RATIO` (0.9) × baseline. One `camera_degraded` anomaly is published with `scope: "system"`, no `camera_id` and the cameras in `affected_cameras`, instead of an alert per camera.
+  - **While it lasts:** no new per-camera alerts start. `details.suppressed_checks` counts the checks that would otherwise have alarmed. An `update` is published when more cameras are affected.
+  - **End:** after `ANOMALY_CLEAR_AFTER` (3) checks with fewer cameras affected. Per-camera alerts that started up to `ANOMALY_SYSTEM_LOOKBACK_SECONDS` (60) before it are closed at the same time, with `details.closed_by: "system_degradation"`. Alerts that started earlier carry on normally.
+  - **Limit:** if throughput stays lower for good, the baseline adopts it after about 5 minutes and the episode ends.
+- **What an alert contains:** `start`, `update` and `end` `Anomaly` messages are published to `anomalies` with the same `anomaly_id`. One row in the `anomalies` table tracks them (`severity`, `update_count`, and `details` with `fired_by`, `score_parts`, `hold`, `frozen_baseline`, `held_checks`). They carry:
+  - hints (`speed_drop`, `stopped_vehicles`, `pedestrian_in_road`, `sensor_dropout`, `camera_degraded`);
+  - the score, threshold and contributing features;
+  - the congestion level;
+  - both model versions.
+- **Models:** champions are loaded from the MLflow registry at startup. The registry is checked every `MODEL_REFRESH_SECONDS` (300), and a model is reloaded when its `champion` alias moves. Versions in use are recorded in `model_versions`. Without a registered champion, the service uses rule-based detectors (`ml/models/rules.py`) and logs a WARNING saying so.
+
+```sql
+SELECT camera_id, anomaly_type, hints, round(score::numeric, 2) AS score, status, detected_at, ended_at
+FROM anomalies ORDER BY detected_at DESC LIMIT 10;
+SELECT * FROM camera_congestion;
+```
+
 ## Event simulator
 
 `event_simulator` produces the non-video inputs for every camera in the `cameras` table, re-reading the table every `CAMERA_REFRESH_SECONDS`:
@@ -242,7 +352,7 @@ Options: `--train N`, `--test N`, `--train-seed`, `--test-seed`, `--out DIR`.
 services/<name>/     main.py, Dockerfile, requirements.txt per service
 shared/              traffic-common package: settings, Kafka schemas + clients, DB models + migrations
 dashboard/           React + Vite + TypeScript frontend
-ml/                  training/, evaluation/, monitoring/
+ml/                  features, labels, datasets, models, training CLIs, evaluation (+ ml-trainer image)
 data/                local datasets and sample videos (git-ignored)
 models/              trained model artifacts (git-ignored, mounted read-only)
 tests/               repository-level tests (+ Dockerfile for the in-Docker test runner)
@@ -332,12 +442,17 @@ ruff check .
 | `test_event_simulator.py` | nothing | Report variety and label correctness, train/test holdout separation, dataset files, daily traffic pattern, weather, scenario YAML parsing and timelines, scenario runs, control commands |
 | `test_cv_inference.py` | nothing | Zones (point-in-polygon, scaling, defaults), speed and smoothing, stopped detection, metric windows, latest-frame scheduling, message building |
 | `test_cv_inference_integration.py` | Ultralytics (+ Kafka) | YOLO26n + ByteTrack on 12 frames of a sample video produce valid, tracked `Detection`s and metrics; the messages round-trip through `detections` |
+| `test_ml_core.py` | pandas | Feature engineering, relative baselines, weak labels, window building, scenario labels, synthetic data, threshold calibration, alarm start, end, cooldown and persistence, evaluation metrics, hints, rule-based models |
+| `test_ml_models.py` | torch (Docker) | The autoencoder and both congestion models round-trip through MLflow pyfunc packaging and score raw rows |
+| `test_anomaly_service.py` | Postgres | Model reload when the champion alias moves, rule fallback, keeping the current model when the registry is down, the sensor join, start and end events, cooldown, stale metrics, sensor storage |
+| `test_anomaly_integration.py` | Kafka + Postgres | A synthetic incident published to `traffic.metrics` produces an `Anomaly` on `anomalies` and a row in `anomalies` |
 | `test_event_simulator_integration.py` | Kafka + Postgres | A scenario triggered through `simulator.control` emits tagged messages on `reports.text` and `events.raw`, and its ground truth lands in `scenario_runs` and `simulated_reports` |
 
-Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. Three integration tests do publish to real topics:
+Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. Four integration tests do publish to real topics:
 
 - **video_ingest:** a few dozen frames on `video.frames`, under a `test-cam-<id>` camera id. Their frame files no longer exist.
 - **cv_inference:** 4 `Detection`s on `detections` under a `test-cam-<id>` camera id.
+- **anomaly_service:** about 36 `TrafficMetrics` on `traffic.metrics` and one `Anomaly`, for a `test-cam-<id>` camera.
 - **event_simulator:** a scenario's reports and events on `reports.text` and `events.raw`, tagged with a `test-cam-<id>` camera and that run's `scenario_id`. The live simulator also receives the test's control command and logs `rejected start_scenario … unknown camera`, as intended.
 
 Those messages stay until Kafka retention removes them.

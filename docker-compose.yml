@@ -217,6 +217,27 @@ services:
     restart: unless-stopped
     networks: [traffic]
 
+  # ------------------------------------------------------------------- ML training
+  # Not started by `up`. Run with:
+  #   docker compose run --rm ml-trainer python -m ml.training.train_congestion
+  #   docker compose run --rm ml-trainer python -m ml.training.train_anomaly
+  ml-trainer:
+    profiles: [ml]
+    build: { context: ., dockerfile: ml/Dockerfile }
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GIT_PYTHON_REFRESH: quiet   # MLflow probes git for run metadata; the image has none
+    volumes:
+      - ./ml:/workspace/ml
+      - ./data:/workspace/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    networks: [traffic]
   # ------------------------------------------------------------------- test runner
   # Not started by `up`. Run with .\scripts\test.ps1 (docker compose --profile test run --rm tests).
   tests:
@@ -226,6 +247,9 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Small models: torch/OpenMP on every vCPU made the model tests take 8+ minutes.
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
     volumes:
       - ./:/repo
       - weights:/weights:ro   # reuse cv_inference's cached YOLO weights

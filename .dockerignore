@@ -12,6 +12,5 @@ dashboard
 data
 models
 mlruns
-ml
 tests
 infra

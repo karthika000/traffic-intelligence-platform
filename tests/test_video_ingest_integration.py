@@ -54,8 +54,13 @@ def end_offsets(bootstrap: str, topic: str) -> list[TopicPartition]:
 
 
 def read_from(bootstrap: str, start: list[TopicPartition], camera_id: str, minimum: int):
-    c = Consumer({"bootstrap.servers": bootstrap, "group.id": f"reader-{uuid.uuid4().hex}",
-                  "enable.auto.commit": False})
+    c = Consumer(
+        {
+            "bootstrap.servers": bootstrap,
+            "group.id": f"reader-{uuid.uuid4().hex}",
+            "enable.auto.commit": False,
+        }
+    )
     c.assign(start)
     found, deadline = [], time.monotonic() + 20
     try:
@@ -70,10 +75,16 @@ def read_from(bootstrap: str, start: list[TopicPartition], camera_id: str, minim
 
 def test_worker_publishes_frames_to_video_frames(kafka_bootstrap: str, tmp_path: Path) -> None:
     camera_id = f"test-cam-{uuid.uuid4().hex[:8]}"
-    video = generate_traffic_video(tmp_path / "clip.mp4", seconds=VIDEO_SECONDS, fps=SOURCE_FPS,
-                                   width=1920, height=1080)
-    config = IngestConfig(sample_fps=SAMPLE_FPS, max_width=640, jpeg_quality=70,
-                          frames_dir=tmp_path / "frames", retry_initial_seconds=0.1)
+    video = generate_traffic_video(
+        tmp_path / "clip.mp4", seconds=VIDEO_SECONDS, fps=SOURCE_FPS, width=1920, height=1080
+    )
+    config = IngestConfig(
+        sample_fps=SAMPLE_FPS,
+        max_width=640,
+        jpeg_quality=70,
+        frames_dir=tmp_path / "frames",
+        retry_initial_seconds=0.1,
+    )
     start = end_offsets(kafka_bootstrap, Topic.VIDEO_FRAMES)
 
     with TypedProducer(kafka_bootstrap, register_shutdown=False) as producer:
@@ -114,11 +125,17 @@ def test_worker_publishes_frames_to_video_frames(kafka_bootstrap: str, tmp_path:
 
 
 def test_worker_retries_missing_source_without_crashing(tmp_path: Path) -> None:
-    config = IngestConfig(frames_dir=tmp_path / "frames", retry_initial_seconds=0.05,
-                          retry_max_seconds=0.2)
+    config = IngestConfig(
+        frames_dir=tmp_path / "frames", retry_initial_seconds=0.05, retry_max_seconds=0.2
+    )
     published: list[FrameMessage] = []
-    worker = CameraWorker("cam-missing", VideoSource(SourceKind.FILE, str(tmp_path / "nope.mp4")),
-                          config, FrameStore(config.frames_dir), published.append)
+    worker = CameraWorker(
+        "cam-missing",
+        VideoSource(SourceKind.FILE, str(tmp_path / "nope.mp4")),
+        config,
+        FrameStore(config.frames_dir),
+        published.append,
+    )
     worker.start()
     time.sleep(1.0)
     worker.stop()

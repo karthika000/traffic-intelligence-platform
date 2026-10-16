@@ -64,10 +64,22 @@ def generate_traffic_video(
                 x = int(v["x"]) - v["length"]
                 y_mid = int(top + (v["lane"] + 0.5) * lane_height)
                 half = int(lane_height * 0.3)
-                cv2.rectangle(frame, (x, y_mid - half), (x + v["length"], y_mid + half),
-                              v["colour"], thickness=-1)
-            cv2.putText(frame, f"SYNTHETIC  t={i / fps:5.1f}s", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.rectangle(
+                    frame,
+                    (x, y_mid - half),
+                    (x + v["length"], y_mid + half),
+                    v["colour"],
+                    thickness=-1,
+                )
+            cv2.putText(
+                frame,
+                f"SYNTHETIC  t={i / fps:5.1f}s",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2,
+            )
             writer.write(frame)
     finally:
         writer.release()

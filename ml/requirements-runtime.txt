@@ -1,0 +1,9 @@
+# Runtime for the congestion and anomaly models: installed by both the ml-trainer image and
+# anomaly_service, with exact pins so pickled models load with the versions they were
+# trained with. Same CPU-only PyTorch wheels as cv_inference.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+scikit-learn==1.9.1
+pandas==2.3.3
+# Matches the MLflow server version in infra/mlflow.
+mlflow-skinny==2.17.2

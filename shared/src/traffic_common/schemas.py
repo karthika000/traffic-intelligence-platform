@@ -17,7 +17,15 @@ from uuid import UUID, uuid4
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from traffic_common.enums import DriftType, IncidentStatus, ReportSource, Severity, SummaryScope
+from traffic_common.enums import (
+    AnomalyHint,
+    CongestionLevel,
+    DriftType,
+    IncidentStatus,
+    ReportSource,
+    Severity,
+    SummaryScope,
+)
 from traffic_common.topics import Topic
 
 
@@ -209,17 +217,46 @@ class NLPResult(KafkaMessage):
 
 
 class Anomaly(_Window, KafkaMessage):
+    """An anomaly episode for one camera, as a series of events with the same ``anomaly_id``:
+    ``start`` when the score crosses the threshold, ``update`` when an active episode's
+    severity rises or its hints change (escalation), ``end`` when it is back to normal.
+    ``score`` on update/end events is the episode's peak so far. ``contributing_features``
+    keys are "reconstruction:<feature>" or "level:<feature>" (distance from the baseline);
+    ``details["fired_by"]`` says which part produced the score.
+
+    ``scope="system"`` marks a pipeline-wide degradation (several cameras' frames or detection
+    confidence dropping in the same check): it has no ``camera_id``, lists the cameras in
+    ``affected_cameras``, and per-camera traffic alerts are suppressed while it is active."""
+
     anomaly_id: UUID = Field(default_factory=uuid4)
-    camera_id: CameraId
-    anomaly_type: ShortStr
-    metric_name: ShortStr
+    scope: Literal["camera", "system"] = "camera"
+    camera_id: CameraId | None = None  # required for scope "camera"
+    affected_cameras: list[CameraId] = Field(default_factory=list)
+    event: Literal["start", "update", "end"] = "start"
+    severity: Severity | None = None  # from score / threshold, see anomaly_service config
+    anomaly_type: ShortStr  # the leading hint, or "unknown"
+    hints: list[AnomalyHint] = Field(default_factory=list)
+    metric_name: ShortStr  # the most anomalous input
     observed_value: float
     expected_value: float | None = None
     score: float
     threshold: float
+    contributing_features: dict[str, float] = Field(default_factory=dict)  # share of the score
+    congestion_level: CongestionLevel | None = None
     model_name: ShortStr
     model_version: ShortStr
+    model_versions: dict[str, str] = Field(default_factory=dict)  # every model involved
+    started_at: UtcDatetime | None = None
+    ended_at: UtcDatetime | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _camera_for_camera_scope(self) -> Self:
+        if self.scope == "camera" and self.camera_id is None:
+            raise ValueError("camera_id is required for a camera-scoped anomaly")
+        if self.scope == "system" and not self.affected_cameras:
+            raise ValueError("a system-scoped anomaly must list affected_cameras")
+        return self
 
 
 class Incident(KafkaMessage):

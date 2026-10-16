@@ -12,11 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Engine, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import Engine
 
-from traffic_common.db.models import ModelVersion
-from traffic_common.enums import ModelStage
+from traffic_common.db.registry import record_model_version as _record
 
 log = logging.getLogger(__name__)
 
@@ -133,31 +131,5 @@ def _local_fallback(model: str, name: str, weights_dir: Path, exc: Exception) ->
 
 
 def record_model_version(engine: Engine, model: ResolvedModel, metrics: dict[str, Any]) -> None:
-    """Upsert the model in use into model_versions as production; any other production
-    version of the same model is archived (one version serves at a time)."""
-    stmt = insert(ModelVersion).values(
-        model_name=model.name,
-        version=model.version,
-        stage=ModelStage.PRODUCTION,
-        mlflow_run_id=model.run_id,
-        metrics=metrics,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[ModelVersion.model_name, ModelVersion.version],
-        set_={
-            "stage": stmt.excluded.stage,
-            "mlflow_run_id": stmt.excluded.mlflow_run_id,
-            "metrics": stmt.excluded.metrics,
-        },
-    )
-    with engine.begin() as conn:
-        conn.execute(
-            update(ModelVersion)
-            .where(
-                ModelVersion.model_name == model.name,
-                ModelVersion.version != model.version,
-                ModelVersion.stage == ModelStage.PRODUCTION,
-            )
-            .values(stage=ModelStage.ARCHIVED)
-        )
-        conn.execute(stmt)
+    """Record the model in use in model_versions (see traffic_common.db.registry)."""
+    _record(engine, model.name, model.version, mlflow_run_id=model.run_id, metrics=metrics)

@@ -23,8 +23,11 @@ from traffic_common.db.session import create_db_engine
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m traffic_common.db", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        prog="python -m traffic_common.db",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--url", help="database URL (default: POSTGRES_URL)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("upgrade").add_argument("revision", nargs="?", default="head")
@@ -51,8 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "revision":
         # Write new revisions into the source tree, not an installed copy.
         versions = Path(__file__).parent / "migrations" / "versions"
-        command.revision(cfg, message=args.message, autogenerate=args.autogenerate,
-                         version_path=str(versions))
+        command.revision(
+            cfg, message=args.message, autogenerate=args.autogenerate, version_path=str(versions)
+        )
     elif args.command == "seed":
         count = seed_cameras(create_db_engine(args.url))
         print(f"seeded demo cameras: {count} present")

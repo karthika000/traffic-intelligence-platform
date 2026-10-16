@@ -67,3 +67,20 @@ class ScenarioStatus(StrEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
+
+
+class CongestionLevel(StrEnum):
+    FREE_FLOW = "free_flow"
+    MODERATE = "moderate"
+    HEAVY = "heavy"
+    STANDSTILL = "standstill"
+
+
+class AnomalyHint(StrEnum):
+    """What an anomaly most likely is, from its contributing features."""
+
+    SPEED_DROP = "speed_drop"
+    STOPPED_VEHICLES = "stopped_vehicles"
+    PEDESTRIAN_IN_ROAD = "pedestrian_in_road"
+    SENSOR_DROPOUT = "sensor_dropout"
+    CAMERA_DEGRADED = "camera_degraded"

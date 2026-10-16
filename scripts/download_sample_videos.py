@@ -161,8 +161,14 @@ def fetch_camera_video(camera_id: str, title: str, force: bool) -> Result:
 def synthetic_video(camera_id: str, seed: int) -> Result:
     dest = VIDEOS_DIR / f"{camera_id}-synthetic.mp4"
     generate_traffic_video(dest, seconds=20, seed=seed)
-    return Result(camera_id, dest, "synthetic (generated with OpenCV)", "n/a (generated locally)",
-                  "this script", "")
+    return Result(
+        camera_id,
+        dest,
+        "synthetic (generated with OpenCV)",
+        "n/a (generated locally)",
+        "this script",
+        "",
+    )
 
 
 def update_database(results: list[Result], db_url: str | None) -> None:
@@ -183,8 +189,12 @@ def update_database(results: list[Result], db_url: str | None) -> None:
 def write_attribution(results: list[Result]) -> Path:
     lines = ["# Sample video attribution", ""]
     for r in results:
-        lines += [f"## {r.path.name} ({r.camera_id})", f"- Source: {r.source}",
-                  f"- Author: {r.author}", f"- Licence: {r.license}"]
+        lines += [
+            f"## {r.path.name} ({r.camera_id})",
+            f"- Source: {r.source}",
+            f"- Author: {r.author}",
+            f"- Licence: {r.license}",
+        ]
         if r.page_url:
             lines.append(f"- File page: {r.page_url}")
         lines.append("")

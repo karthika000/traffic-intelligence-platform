@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from traffic_common.enums import (
+    CongestionLevel,
     DriftType,
     EvidenceType,
     IncidentStatus,
@@ -161,7 +162,11 @@ class DetectionAggregate(Base):
         CheckConstraint("object_count >= 0", name="object_count_non_negative"),
         # Explicit name: the generated one would exceed PostgreSQL's 63-character identifier limit.
         UniqueConstraint(
-            "camera_id", "window_start", "object_class", "model_name", "model_version",
+            "camera_id",
+            "window_start",
+            "object_class",
+            "model_name",
+            "model_version",
             name="uq_detection_aggregates_window_class_model",
         ),
         Index("ix_detection_aggregates_camera_id_window_start", "camera_id", "window_start"),
@@ -216,7 +221,9 @@ class Anomaly(Base):
     __tablename__ = "anomalies"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)  # Anomaly.anomaly_id
-    camera_id: Mapped[str] = _camera_fk()
+    camera_id: Mapped[str | None] = _camera_fk(nullable=True)  # NULL for scope 'system'
+    scope: Mapped[str] = mapped_column(String(20), server_default=text("'camera'"))
+    affected_cameras: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     anomaly_type: Mapped[str] = mapped_column(String(50))
     metric_name: Mapped[str] = mapped_column(String(100))
     observed_value: Mapped[float]
@@ -229,9 +236,26 @@ class Anomaly(Base):
     model_name: Mapped[str]
     model_version: Mapped[str] = mapped_column(String(100))
     details: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    status: Mapped[str] = mapped_column(
+        String(20), server_default=text("'active'")
+    )  # active | ended
+    ended_at: Mapped[datetime | None]
+    hints: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    contributing_features: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    congestion_level: Mapped[CongestionLevel | None] = mapped_column(
+        _enum(CongestionLevel, "congestion_level")
+    )
+    model_versions: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    severity: Mapped[Severity | None] = mapped_column(_enum(Severity, "severity"))
+    update_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint("window_end > window_start", name="window_ordered"),
+        CheckConstraint("status IN ('active', 'ended')", name="status_valid"),
+        CheckConstraint("scope IN ('camera', 'system')", name="scope_valid"),
+        CheckConstraint(
+            "scope = 'system' OR camera_id IS NOT NULL", name="camera_for_camera_scope"
+        ),
         Index("ix_anomalies_camera_id_detected_at", "camera_id", "detected_at"),
         Index("ix_anomalies_detected_at", "detected_at"),
     )
@@ -374,6 +398,46 @@ class DriftReport(Base):
         Index("ix_drift_reports_camera_id_created_at", "camera_id", "created_at"),
         Index("ix_drift_reports_created_at", "created_at"),
     )
+
+
+class SensorReading(Base):
+    """Loop-detector readings from events.raw, stored by anomaly_service so they can be joined
+    with traffic_metrics (training data) by camera and time."""
+
+    __tablename__ = "sensor_readings"
+
+    id: Mapped[int] = _pk()
+    event_id: Mapped[uuid.UUID] = mapped_column(unique=True)  # RawEvent.event_id
+    camera_id: Mapped[str] = _camera_fk()
+    detector_id: Mapped[str | None] = mapped_column(String(100))
+    reading_at: Mapped[datetime]
+    vehicle_count: Mapped[int | None] = mapped_column(Integer)
+    flow_veh_per_hour: Mapped[float | None]
+    avg_speed_kmh: Mapped[float | None]
+    occupancy: Mapped[float | None]
+    interval_seconds: Mapped[float | None]
+    scenario_id: Mapped[uuid.UUID | None]  # set while a simulated scenario drove the reading
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        Index("ix_sensor_readings_camera_id_reading_at", "camera_id", "reading_at"),
+        Index("ix_sensor_readings_reading_at", "reading_at"),
+    )
+
+
+class CameraCongestion(Base):
+    """Current congestion level per camera (one row per camera, updated every few seconds)."""
+
+    __tablename__ = "camera_congestion"
+
+    camera_id: Mapped[str] = mapped_column(String(64), ForeignKey("cameras.id"), primary_key=True)
+    level: Mapped[CongestionLevel] = mapped_column(_enum(CongestionLevel, "congestion_level"))
+    confidence: Mapped[float | None]
+    anomaly_score: Mapped[float | None]
+    anomaly_threshold: Mapped[float | None]
+    model_versions: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    window_end: Mapped[datetime]
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
 # ------------------------------------------------------------------ simulation ground truth

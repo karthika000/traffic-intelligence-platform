@@ -31,7 +31,9 @@ T0 = datetime(2026, 10, 14, 8, 0, tzinfo=UTC)
 
 def metrics(camera_id: str = "cam-a", count: int = 10) -> TrafficMetrics:
     return TrafficMetrics(
-        camera_id=camera_id, window_start=T0, window_end=T0 + timedelta(minutes=1),
+        camera_id=camera_id,
+        window_start=T0,
+        window_end=T0 + timedelta(minutes=1),
         vehicle_count=count,
     )
 
@@ -54,8 +56,14 @@ class Scratch:
     def consumer(self, handler, stop: threading.Event, **kwargs) -> TypedConsumer:
         kwargs.setdefault("initial_backoff", 0.05)
         return TypedConsumer(
-            [self.topic], self.group, handler, self.bootstrap,
-            schemas=self.schemas, stop_event=stop, poll_timeout=0.2, **kwargs,
+            [self.topic],
+            self.group,
+            handler,
+            self.bootstrap,
+            schemas=self.schemas,
+            stop_event=stop,
+            poll_timeout=0.2,
+            **kwargs,
         )
 
     def raw_produce(self, *values: bytes, key: bytes | None = b"cam-a") -> None:
@@ -65,8 +73,13 @@ class Scratch:
         assert p.flush(10) == 0
 
     def read(self, topic: str, expected: int, timeout: float = 15.0) -> list:
-        c = Consumer({"bootstrap.servers": self.bootstrap, "group.id": f"reader-{uuid.uuid4().hex}",
-                      "enable.auto.commit": False})
+        c = Consumer(
+            {
+                "bootstrap.servers": self.bootstrap,
+                "group.id": f"reader-{uuid.uuid4().hex}",
+                "enable.auto.commit": False,
+            }
+        )
         c.assign([TopicPartition(topic, 0, 0)])
         out, deadline = [], time.monotonic() + timeout
         while len(out) < expected and time.monotonic() < deadline:
@@ -99,8 +112,9 @@ def scratch(kafka_bootstrap: str) -> Iterator[Scratch]:
         f.result(timeout=15)
 
 
-def run_until(consumer: TypedConsumer, stop: threading.Event, done: Callable[[], bool],
-              timeout: float = 30.0) -> None:
+def run_until(
+    consumer: TypedConsumer, stop: threading.Event, done: Callable[[], bool], timeout: float = 30.0
+) -> None:
     errors: list[BaseException] = []
 
     def target() -> None:
@@ -132,8 +146,15 @@ def header(msg, name: str) -> str:
 def test_producer_validates_keys_by_camera_and_tags_schema(scratch: Scratch) -> None:
     with scratch.producer() as p:
         p.send(scratch.topic, metrics("cam-a", 1))
-        p.send(scratch.topic, {"camera_id": "cam-b", "window_start": T0,
-                               "window_end": T0 + timedelta(minutes=1), "vehicle_count": 2})
+        p.send(
+            scratch.topic,
+            {
+                "camera_id": "cam-b",
+                "window_start": T0,
+                "window_end": T0 + timedelta(minutes=1),
+                "vehicle_count": 2,
+            },
+        )
         p.send(scratch.topic, metrics("cam-a", 3), key="override")
 
     got = scratch.read(scratch.topic, 3)
@@ -278,8 +299,14 @@ def test_process_shutdown_runs_registered_callbacks(scratch: Scratch) -> None:
     """With the default (process-wide) stop event, run() ends by running shutdown callbacks."""
     ran = []
     on_shutdown(lambda: ran.append("flushed"))
-    c = TypedConsumer([scratch.topic], scratch.group, lambda m: None, scratch.bootstrap,
-                      schemas=scratch.schemas, poll_timeout=0.2)
+    c = TypedConsumer(
+        [scratch.topic],
+        scratch.group,
+        lambda m: None,
+        scratch.bootstrap,
+        schemas=scratch.schemas,
+        poll_timeout=0.2,
+    )
     threading.Timer(1.0, c.stop).start()
     c.run()
     assert ran == ["flushed"]

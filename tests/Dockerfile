@@ -16,8 +16,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY services/video_ingest/requirements.txt /tmp/requirements/video_ingest.txt
 COPY services/event_simulator/requirements.txt /tmp/requirements/event_simulator.txt
 COPY services/cv_inference/requirements.txt /tmp/requirements/cv_inference.txt
+COPY ml/requirements-runtime.txt /tmp/requirements/ml-runtime.txt
 RUN pip install -r /tmp/requirements/video_ingest.txt -r /tmp/requirements/event_simulator.txt \
-        -r /tmp/requirements/cv_inference.txt \
+        -r /tmp/requirements/cv_inference.txt -r /tmp/requirements/ml-runtime.txt \
     && pip uninstall -y opencv-python \
     && pip install --no-deps --force-reinstall "opencv-python-headless>=4.10,<5" \
     && rm -rf /tmp/requirements

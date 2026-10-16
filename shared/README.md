@@ -50,11 +50,15 @@ settings = get_settings("anomaly_service")
 producer = TypedProducer(settings.kafka_bootstrap_servers, client_id="anomaly_service")
 producer.send(Topic.TRAFFIC_METRICS, metrics)  # validated, keyed by metrics.camera_id
 
-def handle(msg: TrafficMetrics) -> None:
-    ...  # raise to retry; offsets are committed only after this returns
 
-TypedConsumer([Topic.TRAFFIC_METRICS], ConsumerGroup.ANOMALY_SERVICE, handle,
-              settings.kafka_bootstrap_servers).run()  # blocks until SIGTERM
+def handle(msg: TrafficMetrics) -> None:
+    # raise to retry; offsets are committed only after this returns
+    ...
+
+
+TypedConsumer(
+    [Topic.TRAFFIC_METRICS], ConsumerGroup.ANOMALY_SERVICE, handle, settings.kafka_bootstrap_servers
+).run()  # blocks until SIGTERM
 ```
 
 How the producer behaves:
