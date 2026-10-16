@@ -311,15 +311,26 @@ class Incident(KafkaMessage):
 
 
 class Summary(KafkaMessage):
+    """A natural-language summary. For incidents (scope "incident") the summarizer writes a
+    ``headline`` and a 2-4 sentence ``text`` for one ``incident_version``; ``generation``
+    says whether the model's output was used or the deterministic template (and
+    ``faithfulness`` why: the guard's verdict, violations, errors or timeouts)."""
+
     summary_id: UUID = Field(default_factory=uuid4)
     scope: SummaryScope
     camera_id: CameraId | None = None
     incident_id: UUID | None = None
+    incident_version: int | None = Field(default=None, ge=1)
     period_start: UtcDatetime
     period_end: UtcDatetime
+    headline: ShortStr | None = None
     text: str = Field(min_length=1, max_length=10_000)
+    generation: Literal["model", "template"] | None = None
     model_name: ShortStr
     model_version: ShortStr
+    prompt_version: ShortStr | None = None
+    latency_ms: float | None = Field(default=None, ge=0)
+    faithfulness: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _scope_target(self) -> Self:

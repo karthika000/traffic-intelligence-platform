@@ -69,6 +69,8 @@ services:
   summarizer:
     <<: *python-service
     build: { context: ., dockerfile: services/summarizer/Dockerfile }
+    volumes:
+      - hf_cache:/hf_cache   # flan-t5 weights, downloaded once (shared with ml-trainer)
 
   api:
     <<: *python-service

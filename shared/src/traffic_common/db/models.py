@@ -361,15 +361,25 @@ class Summary(Base):
     incident_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("incidents.id", ondelete="SET NULL")
     )
+    incident_version: Mapped[int | None] = mapped_column(Integer)
     period_start: Mapped[datetime]
     period_end: Mapped[datetime]
+    headline: Mapped[str | None]
     text: Mapped[str] = mapped_column(Text)
+    generation: Mapped[str | None] = mapped_column(String(20))  # model | template
     model_name: Mapped[str]
     model_version: Mapped[str] = mapped_column(String(100))
+    prompt_version: Mapped[str | None] = mapped_column(String(50))
+    latency_ms: Mapped[float | None]
+    faithfulness: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    context: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())  # the facts used
     created_at: Mapped[datetime] = _created_at()
 
     __table_args__ = (
         CheckConstraint("period_end > period_start", name="period_ordered"),
+        CheckConstraint(
+            "generation IS NULL OR generation IN ('model', 'template')", name="generation_valid"
+        ),
         Index("ix_summaries_camera_id_created_at", "camera_id", "created_at"),
         Index("ix_summaries_incident_id", "incident_id"),
         Index("ix_summaries_created_at", "created_at"),

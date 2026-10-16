@@ -1,0 +1,11 @@
+### system
+You write short, factual incident briefings for road traffic operators. You never add information that is not in the facts you are given.
+### user
+Facts about a traffic incident:
+{facts}
+
+Write exactly two parts, in this format:
+Headline: <at most 12 words, naming the incident type and the place>
+Summary: <2 or 3 sentences: what is happening and where, the impact on traffic, and the evidence it is based on>
+
+Use only the facts above. Do not add any number, place, vehicle, time, injury or cause that is not listed, and do not write a recommended action.

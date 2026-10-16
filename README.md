@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service` and `fusion_service` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service`, `fusion_service` and `summarizer` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -355,6 +355,7 @@ The command joins `nlp_results` with the simulator's ground truth in `simulated_
 - **A time-of-day baseline is planned** once more real data exists, ideally several weeks per camera, so each camera can be compared with its usual traffic at that hour and weekday.
 - **The text models have only seen simulated reports.** Reports come from templates with injected noise. The test split's unseen phrasing is a fairer check than validation, but real reports will be more varied, and accuracy on them is unknown until real labelled reports exist.
 - **Camera matching only knows the gazetteer.** Places outside it (side streets, new landmarks) get no camera, and nothing is geocoded. The camera a report is tagged with by its source (the simulator sets one) is recorded in `details.reported_camera_id` for evaluation, but never used for matching.
+- **Summaries are short and template-like.** The local models are small, and the guard rejects anything it can't verify. ROUGE-L is measured against references we wrote ourselves from the same facts, so it rewards fact coverage, not prose quality.
 - **Camera artefacts cause false alarms.** Elephant & Castle's parked vans flicker in and out of "stopped" and cause most real false alarms (about 2 per camera-hour overall). Per-camera zone configs that exclude parking areas would reduce that.
 
 ## Anomaly service
@@ -467,6 +468,74 @@ The command compares incidents with `scenario_runs` and logs to the MLflow exper
 
 - **Per scenario type:** detection rate, time from scenario start to suspected and to confirmed, type and severity accuracy, and time to resolve after the scenario's clearing phase.
 - **False incidents:** incidents outside scenario windows, per camera-hour, with suspected and confirmed counted separately.
+
+## Summarizer
+
+The summarizer writes incident summaries for operators with a local model. Nothing is sent to an external LLM API.
+
+### When it summarizes
+
+- **Input:** it consumes `incidents` as consumer group `summarizer`.
+- **Triggers:** a summary is written when an incident is created or confirmed, is resolved, or changes type or severity. A confidence change alone doesn't trigger one.
+- **Debounce:** updates to one incident within `SUMMARY_DEBOUNCE_SECONDS` (10) are merged, and only the latest version is summarized. Each summary records what triggered it.
+- **After a restart:** incident versions from the last hour that have no summary yet are summarized.
+
+### Facts
+
+- **Context:** a fact-only context is built from the `Incident` message and Postgres (`ml/summarize/context.py`):
+  - camera name and area, incident type, severity, status, start time (London time) and duration;
+  - congestion level, stopped vehicles and pedestrians in the roadway;
+  - **Speed:** loop-detector speed against its own pre-incident baseline (the 10 minutes before the start). Camera speed is stated only when its ratio to baseline agrees with the loops (within 25 points) or there is no loop data. The demo cameras play looped footage that never shows a simulated incident, which once produced "8 km/h against 6 km/h normally" during a standstill;
+  - the number of reports and their sources, and the vehicles, lanes and places they mention;
+  - the confidence breakdown, and whether vision was degraded.
+- **Recommended action:** derived by rule from status and severity (dispatch and divert, divert and patrol, monitor, verify on camera), so the model can't make one up.
+
+### Output
+
+Each summary has a headline of under 15 words and 2–4 sentences: what is happening, the impact, the evidence, and the recommended action.
+
+- **Model:** `google/flan-t5-base` by default, with the prompt template `ml/summarize/prompts/v1.txt`. Chat models such as Qwen2.5-Instruct use the chat prompt `v2.txt`, which asks for a headline and a summary in a single generation. The recorded prompt version includes a content hash. Weights come from the shared `hf_cache` volume, and threads are capped at 2.
+- **Faithfulness guard:** the summarizer checks the model's output (`ml/summarize/faithfulness.py`) and uses the deterministic template instead when:
+  - any number, time, place name or vehicle type in it isn't in the facts;
+  - it contradicts the incident type, severity or status;
+  - generation fails, or takes longer than `SUMMARY_TIMEOUT_SECONDS` (20);
+  - the output is too short.
+
+  The published summary says which path was used (`generation`), why (`faithfulness`), and what the model wrote when it was rejected.
+- **Configuration:** the service loads the `incident-summarizer` @champion from MLflow (model name, prompt version, generation settings), reloads it when the alias moves, and records it in `model_versions`.
+- **Storage:** summaries go to the `summaries` table with the incident version and the context used, and are published to `summaries`.
+
+### Evaluation
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.evaluation.summarizer_eval
+```
+
+The evaluation uses a reference set of 40 contexts: the stored incidents, topped up with contexts built from every phase of the scenario ground truth. Reference summaries are written from the same facts in a different style from the template (`ml/summarize/reference.py`).
+
+It always uses the same pinned reference set (`data/summarizer/reference_set.json`). It compares the template with flan-t5-small and flan-t5-base (prompt v1) and Qwen2.5-0.5B-Instruct (prompt v2). Qwen2.5-1.5B-Instruct is included only if its p95 latency on a five-context probe is under 10 s. The comparison covers:
+- ROUGE-L of the raw model output, and of what the service would publish after the guard;
+- the guard's pass rate and the fallback rate;
+- CPU latency with 2 threads.
+
+The configuration with the best published ROUGE-L, among those with a guard pass rate of at least 0.9 that fit the time budget, is registered as `incident-summarizer` @champion. Everything is logged to the MLflow experiment `incident-summarizer`.
+
+Results on the pinned reference set (40 contexts: 20 stored incidents and 20 scenario phases), CPU, 2 threads:
+
+| Configuration | Prompt | ROUGE-L, raw | ROUGE-L, published | Guard pass rate | Fallback rate | Rejected as incomplete | Latency mean / p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| template | – | 0.535 | **0.535** | 1.00 | 0 | 0 | < 1 ms |
+| flan-t5-small | v1 | 0.218 | 0.452 | 0.98 | 0.65 | 0.63 | 1.4 s / 1.9 s |
+| flan-t5-base | v1 | 0.297 | 0.432 | 1.00 | 0.40 | 0.40 | 5.0 s / 8.7 s |
+| Qwen2.5-0.5B-Instruct | v2 (chat) | 0.257 | 0.510 | 0.13 | 0.90 | 0.03 | 14.1 s / 17.1 s |
+| Qwen2.5-1.5B-Instruct | v2 (chat) | excluded: probe p95 121.5 s (over the 10 s limit) | | | | | |
+
+**What the results show:**
+- The flan-t5 models stay faithful but terse (20–27 words) and often incomplete.
+- Qwen2.5-0.5B writes full briefings (about 80 words), but 35 of 40 failed the guard. It invents injuries, numbers of drivers, delays in hours and causes ("speed limit violated"). Its published score is high only because the template replaced most of its outputs.
+- Qwen2.5-1.5B was far too slow for this CPU budget: about 6 GB in full precision in a 7.5 GB Docker VM.
+- Only configurations with a guard pass rate of at least 0.9 can be promoted. Among those, the template has the best published ROUGE-L, so it stays champion (`incident-summarizer` v3).
+- These numbers are lower than in earlier runs because the facts and references now use loop-detector speeds. Part of the template's lead comes from the references being written from the same facts. To try a model in the service anyway, set the `@champion` alias to a registered model configuration.
 
 ## Event simulator
 

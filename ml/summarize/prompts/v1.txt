@@ -1,0 +1,12 @@
+### headline
+Write a short headline of at most 12 words for this traffic incident. Use only the facts given.
+
+{facts}
+
+Headline:
+### summary
+You are writing for road operators. Using only the facts below, write 2 to 3 sentences: what is happening and where, the impact on traffic, and which evidence supports it. Do not add any number, place, vehicle or time that is not in the facts.
+
+{facts}
+
+Summary:

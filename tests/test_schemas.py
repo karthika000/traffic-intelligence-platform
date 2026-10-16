@@ -227,6 +227,8 @@ def test_messages_are_immutable() -> None:
         (NLPResult, {"stage": "sort of"}, "stage"),
         (Summary, {"camera_id": None}, "camera_id"),
         (Summary, {"scope": SummaryScope.INCIDENT}, "incident_id"),
+        (Summary, {"generation": "vibes"}, "generation"),
+        (Summary, {"incident_version": 0}, "greater than or equal"),
         (DriftAlert, {"drift_type": "vibes"}, "drift_type"),
         (SimulatorCommand, {"camera_id": None}, "needs scenario and camera_id"),
         (SimulatorCommand, {"time_scale": 0}, "greater than 0"),
