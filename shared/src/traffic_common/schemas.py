@@ -215,6 +215,8 @@ class NLPResult(KafkaMessage):
     severity: Severity | None = None
     severity_confidence: Probability | None = None
     probabilities: dict[str, dict[str, Probability]] = Field(default_factory=dict)
+    # "cleared" when the report says the incident is over (rule-based, ml.nlp.stage).
+    stage: Literal["active", "cleared"] = "active"
     sentiment: float | None = Field(default=None, ge=-1.0, le=1.0)
     entities: list[Entity] = Field(default_factory=list)
     camera_id: CameraId | None = None
@@ -273,15 +275,28 @@ class Anomaly(_Window, KafkaMessage):
 
 
 class Incident(KafkaMessage):
+    """A fused incident, published by fusion_service on creation and on every meaningful
+    change; ``version`` counts the publications of one ``incident_id`` (1 = created).
+    ``confidence_components`` explains ``fused_confidence``: per-modality scores, their
+    sub-scores and weights (see fusion_service). ``start_time`` is the earliest evidence,
+    ``suspected_at`` / ``confirmed_at`` when fusion reached those states."""
+
     incident_id: UUID = Field(default_factory=uuid4)
     camera_id: CameraId
+    version: int = Field(default=1, ge=1)
     status: IncidentStatus = IncidentStatus.SUSPECTED
+    incident_type: IncidentType = IncidentType.NONE
     severity: Severity
     fused_confidence: Probability
+    confidence_components: dict[str, Any] = Field(default_factory=dict)
+    vision_degraded: bool = False  # vision evidence seen during a system-wide degradation
     start_time: UtcDatetime
+    suspected_at: UtcDatetime | None = None
+    confirmed_at: UtcDatetime | None = None
     end_time: UtcDatetime | None = None
     title: ShortStr
     description: str | None = Field(default=None, max_length=5_000)
+    change_reasons: list[str] = Field(default_factory=list)  # why this version was published
     metric_message_ids: list[UUID] = Field(default_factory=list)
     anomaly_ids: list[UUID] = Field(default_factory=list)
     report_ids: list[UUID] = Field(default_factory=list)

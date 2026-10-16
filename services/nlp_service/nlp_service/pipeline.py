@@ -11,6 +11,7 @@ import pandas as pd
 from ml.nlp.entities import location_spans, resolve_overlaps, rule_entities
 from ml.nlp.matching import CameraMatcher
 from ml.nlp.ner import NerExtractor
+from ml.nlp.stage import report_stage
 from ml.registry import LoadedModel
 from traffic_common.schemas import Entity, NLPResult, TextReport
 
@@ -63,6 +64,7 @@ class NlpPipeline:
                     severity=p["severity"],
                     severity_confidence=round(float(p["severity_confidence"]), 4),
                     probabilities=json.loads(p["probabilities"]),
+                    stage=report_stage(report.text),
                     entities=[Entity(**e) for e in entities],
                     camera_id=match.camera_id,
                     camera_confidence=match.confidence if match.camera_id else None,

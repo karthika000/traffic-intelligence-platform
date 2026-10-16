@@ -65,6 +65,7 @@ class ActiveAnomaly:
     last_published: datetime | None = None
     updates: int = 0
     hold_reasons: list[str] = field(default_factory=list)
+    baseline_released: bool = False  # frozen baseline let go after max_hold_seconds
     threshold: float = 0.0  # latest, for ending the alert from outside the scoring path
     versions: dict[str, str] = field(default_factory=dict)
 

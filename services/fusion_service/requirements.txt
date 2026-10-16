@@ -1,2 +1,5 @@
 # Service-specific dependencies for fusion_service.
-# traffic-common (shared/) is installed separately by the Dockerfile.
+# traffic-common (shared/) is installed separately by the Dockerfile. The ml package is
+# copied in for place-name normalisation (ml.nlp.matching) and report stages (ml.nlp.stage).
+rapidfuzz==3.14.6
+numpy==2.4.6

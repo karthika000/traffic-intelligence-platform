@@ -27,7 +27,7 @@ QUERY = text(
     """
     SELECT s.id AS report_id, s.style, s.stage, s.emitted_at, s.scenario_run_id,
            s.incident_type AS true_type, s.severity AS true_severity, s.camera_id AS true_camera,
-           n.incident_type, n.severity, n.camera_id, n.incident_confidence,
+           n.incident_type, n.severity, n.camera_id, n.incident_confidence, n.stage AS pred_stage,
            n.camera_confidence, n.model_name, n.model_version, n.processed_at
     FROM simulated_reports s
     LEFT JOIN LATERAL (
@@ -63,7 +63,20 @@ def group_metrics(df: pd.DataFrame) -> dict[str, float]:
         "camera_coverage": float(matched.mean()),
         "camera_precision": float(correct_cam[matched].mean()) if matched.any() else np.nan,
         "mean_incident_confidence": float(done.incident_confidence.mean()),
+        # Clearing detection ("cleared" reports speed up incident resolution in fusion).
+        "cleared_recall": _ratio(
+            ((done.pred_stage == "cleared") & (done.stage == "cleared")).sum(),
+            (done.stage == "cleared").sum(),
+        ),
+        "cleared_precision": _ratio(
+            ((done.pred_stage == "cleared") & (done.stage == "cleared")).sum(),
+            (done.pred_stage == "cleared").sum(),
+        ),
     }
+
+
+def _ratio(a, b) -> float:
+    return float(a) / float(b) if b else np.nan
 
 
 def evaluate(df: pd.DataFrame) -> pd.DataFrame:

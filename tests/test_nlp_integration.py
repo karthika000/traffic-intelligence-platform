@@ -23,12 +23,12 @@ pytest.importorskip("rapidfuzz")
 pytest.importorskip("mlflow")
 from alembic import command  # noqa: E402
 from confluent_kafka import Consumer  # noqa: E402
-from nlp_service.config import NlpConfig  # noqa: E402
-from nlp_service.service import NlpService  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from ml.nlp.rules import KeywordIncidentClassifier  # noqa: E402
 from ml.registry import ModelManager  # noqa: E402
+from nlp_service.config import NlpConfig  # noqa: E402
+from nlp_service.service import NlpService  # noqa: E402
 from test_anomaly_integration import end_offsets  # noqa: E402
 from traffic_common.db import create_db_engine  # noqa: E402
 from traffic_common.db.migrate import alembic_config  # noqa: E402
@@ -73,6 +73,10 @@ def test_reports_produce_nlp_results(kafka_bootstrap: str, scratch_database: str
     service = NlpService(NlpConfig(ner_enabled=False), engine, models, producer.send)
     start = end_offsets(kafka_bootstrap, Topic.NLP_RESULTS)
     group = f"test-nlp-{uuid.uuid4().hex[:8]}"
+    # Start the group at the current end of reports.text (no replay, no assignment race).
+    seed = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": group})
+    seed.commit(offsets=end_offsets(kafka_bootstrap, Topic.REPORTS_TEXT), asynchronous=False)
+    seed.close()
     stop = threading.Event()
     consumer = TypedConsumer(
         [Topic.REPORTS_TEXT],
@@ -83,15 +87,11 @@ def test_reports_produce_nlp_results(kafka_bootstrap: str, scratch_database: str
         max_batch=16,
         stop_event=stop,
         poll_timeout=0.2,
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest",  # only applies if the commit above were missing
     )
     thread = threading.Thread(target=consumer.run, daemon=True)
     thread.start()
     try:
-        # Wait for the group to be assigned, so "latest" doesn't skip our reports.
-        deadline = time.monotonic() + 20
-        while not consumer._consumer.assignment() and time.monotonic() < deadline:
-            time.sleep(0.2)
         sent = [TextReport(source=s, text=t) for s, t, _ in REPORTS]
         with TypedProducer(kafka_bootstrap, register_shutdown=False) as p:
             for report in sent:

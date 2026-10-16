@@ -10,12 +10,11 @@ stored in `nlp_results` and published to nlp.results.
 import os
 import threading
 
-from nlp_service.config import NlpConfig
-from nlp_service.service import NlpService
-
 from ml.nlp.ner import NerExtractor
 from ml.nlp.rules import KeywordIncidentClassifier
 from ml.registry import ModelManager
+from nlp_service.config import NlpConfig
+from nlp_service.service import NlpService
 from traffic_common import get_logger, get_settings, shutdown_event
 from traffic_common.db import create_db_engine
 from traffic_common.db.registry import record_model_version

@@ -100,6 +100,9 @@ VALID: dict[type[KafkaMessage], dict] = {
     },
     Incident: {
         "camera_id": CAM,
+        "version": 3,
+        "incident_type": "breakdown",
+        "confidence_components": {"vision": {"score": 0.7}, "text": {"score": 0.8}},
         "severity": Severity.HIGH,
         "fused_confidence": 0.87,
         "start_time": T0,
@@ -220,6 +223,8 @@ def test_messages_are_immutable() -> None:
         (Incident, {"status": IncidentStatus.RESOLVED}, "end_time"),
         (Incident, {"end_time": T0 - timedelta(seconds=1)}, "before start_time"),
         (Incident, {"fused_confidence": 1.01}, "less than or equal"),
+        (Incident, {"version": 0}, "greater than or equal"),
+        (NLPResult, {"stage": "sort of"}, "stage"),
         (Summary, {"camera_id": None}, "camera_id"),
         (Summary, {"scope": SummaryScope.INCIDENT}, "incident_id"),
         (DriftAlert, {"drift_type": "vibes"}, "drift_type"),

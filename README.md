@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service` and `nlp_service` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service` and `fusion_service` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -366,7 +366,7 @@ The command joins `nlp_results` with the simulator's ground truth in `simulated_
 - **Scoring:** every 5 s each camera's history goes through both champion models. The congestion level, score and threshold are written to `camera_congestion`.
 - **Alerts:** an alert *starts* after `ANOMALY_MIN_CONSECUTIVE` (2) checks at or above the camera's threshold.
   - **Frozen baseline:** when an alert starts, the camera's baselines (10-minute medians ending a minute earlier) are frozen. Until the alert ends, the model receives them as `baseline_<column>` inputs, so a long incident doesn't become the new normal.
-  - **Hold rule:** the alert stays open while loop or camera speed (mean of the last 3 windows) is below `ANOMALY_HOLD_SPEED_RATIO` (0.6) × the frozen baseline, or stopped vehicles exceed it by more than `ANOMALY_HOLD_STOPPED_MARGIN` (1). The hold lasts at most `ANOMALY_MAX_HOLD_SECONDS` (1800).
+  - **Hold rule:** the alert stays open while loop or camera speed (mean of the last 3 windows) is below `ANOMALY_HOLD_SPEED_RATIO` (0.6) × the frozen baseline, or stopped vehicles exceed it by more than `ANOMALY_HOLD_STOPPED_MARGIN` (1). The hold lasts at most `ANOMALY_MAX_HOLD_SECONDS` (1800). After that the frozen baseline is released too: a change that lasts that long becomes the new normal, so the score can fall and the alert end (without this, a lasting change in a camera's view kept one alert open for hours).
   - **End:** once the hold is off, the alert ends after `ANOMALY_CLEAR_AFTER` (3) checks below `ANOMALY_CLEAR_RATIO` (0.8) × threshold. A new alert can't start until `ANOMALY_COOLDOWN_SECONDS` (120) after the last one ended.
   - **Severity:** comes from the episode's peak score ÷ threshold, using `ANOMALY_SEVERITY_BOUNDS` (`2,4,8`): below 2× is low, then medium, high, critical.
   - **Updates:** an `update` event is published when severity rises or a new hint appears, at most every `ANOMALY_UPDATE_MIN_SECONDS` (15), so downstream services see escalation.
@@ -404,6 +404,69 @@ nlp_service consumes `reports.text` as consumer group `nlp-service`.
 - **Downloads:** Hugging Face downloads live in the `hf_cache` volume, shared with `ml-trainer`, so restarts don't download again.
 - **Speed:** about 90 ms per report on CPU with NER, most of it NER.
 - **Settings:** `NLP_MAX_BATCH`, `NLP_NER_ENABLED`, `NER_MODEL`, `NLP_MATCH_MIN_SCORE` (0.85) and `NLP_MATCH_MIN_CONFIDENCE` (0.7).
+
+## Fusion service
+
+fusion_service turns per-modality signals into incidents. It consumes `anomalies` (camera- and system-scoped), `nlp.results` and `traffic.metrics` as group `fusion-service`. All settings below can be changed with `FUSION_<NAME>` variables (see `.env.example` and `fusion_service/config.py`).
+
+### Correlation
+
+- **Grouping:** evidence on a camera within a sliding window (`FUSION_WINDOW_SECONDS`, 600) joins the open incident it fits best: anomalies by how well their hints support the incident's type, reports by type compatibility. A camera can have several open incidents. A burst of reports that fits none of them starts its own incident instead of being dropped.
+- **Ignored reports:** NLP results of type `none`, and those with classifier confidence below 0.5.
+- **Unlocated reports:** reports with no matched camera wait in an unlocated pool. One joins an open incident later if one of its place entities fuzzy-matches (at least 0.88) a place named by that incident's reports. Its camera confidence is then 0.8 × the match score.
+- **Equipment faults:** `camera_degraded` and `sensor_dropout` are not incidents. A camera reporting itself degraded also makes its other hints count as degraded vision.
+
+### Incident type and severity
+
+- **Common type:** the type space is `IncidentType`, and the reported type is preferred.
+  - With reports, the type is the classifier-confidence vote of the attached reports. Congestion counts half, because it is usually a consequence of something else.
+  - Without reports, it comes from the anomaly hints: stopped vehicles plus a speed drop → accident; stopped vehicles alone → breakdown; a speed drop alone → congestion; pedestrians in the road → police activity.
+- **Severity:** the maximum of two estimates, kept as a running peak.
+  - **Text:** the highest level at least two reports agree on.
+  - **Vision:** the anomaly's own severity, capped at high unless traffic is at a standstill, and at least what the congestion level implies.
+
+### Fused confidence
+
+The fused confidence is stored as a per-component breakdown, in `incidents.confidence_components` and in every `Incident` message, so the dashboard can show where it came from:
+
+| Part | How it's computed |
+| --- | --- |
+| vision | 0.3 + 0.7 × (0.6 × ratio score + 0.4 × duration score). The ratio score scales peak score ÷ threshold from 1× (0) to 4× (1); the duration score scales the anomaly's duration up to 120 s. × 0.3 if the evidence was seen during a system-wide degradation. |
+| text | 0.4 × (1 − e^(−n/3)) + 0.25 × min(sources, 3)/3 + 0.2 × mean classifier confidence + 0.15 × mean camera-match confidence. *n* is the supporting reports of the last 3 minutes; congestion reports count half for other types, and unrelated reports count zero. |
+| agreement | How well the anomaly hints support the reported type, for example stopped vehicles + accident = 1.0, or a speed drop + weather hazard = 0.8. It is 0 unless both modalities are present. |
+| fused | 0.6 × the stronger modality + 0.25 × the weaker one + 0.15 × agreement |
+
+### Lifecycle
+
+- **Suspected:** when one modality fires.
+  - Vision fires on a traffic anomaly that started recently, unless the camera is under a system-wide degradation.
+  - Text fires on a burst: at least 4 same-type reports in 3 minutes, from at least 2 sources.
+- **Confirmed:**
+  - when both modalities are reasonably strong (vision at least 0.4, text at least 0.65) and agree (at least 0.5);
+  - or when one modality alone reaches 0.9.
+  - The breakdown at that moment is kept in `details.at_confirmation`.
+- **Resolved:** when all three of these hold:
+  - no attached anomaly is active;
+  - the camera's speed is back to at least 0.8 × its pre-incident baseline;
+  - either a clearing report has arrived (`stage: cleared` from nlp_service, after which only `FUSION_CLEAR_MIN_SECONDS`, 20, must pass since the anomaly ended), or the incident hasn't been firing for `FUSION_QUIET_SECONDS` (300). Stray background reports don't keep it firing.
+- **System-wide degradation:** no vision-only incidents are created on the affected cameras. Existing incidents' vision evidence is marked degraded and down-weighted, and that change is published.
+
+### Output and recovery
+
+- **Storage:** incidents and their `incident_evidence` links (anomalies, reports, metric windows, each with a weight and details) are stored in Postgres. A link whose target row isn't written yet is retried for up to 5 minutes.
+- **Publishing:** an `Incident` goes to `incidents` on creation and on every meaningful change: status, severity, type, degraded vision, or a confidence change of at least `FUSION_PUBLISH_CONFIDENCE_DELTA` (0.1). `version` counts these publications, and `change_reasons` says why each was sent.
+- **Restart:** the full state of each open incident is kept in `incidents.details`. On startup, open incidents and the last window of anomalies and NLP results are rebuilt from Postgres. Evidence is keyed by id, so redelivered messages can't duplicate anything.
+
+### Evaluation
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.evaluation.fusion_eval --hours 2
+```
+
+The command compares incidents with `scenario_runs` and logs to the MLflow experiment `incident-fusion`.
+
+- **Per scenario type:** detection rate, time from scenario start to suspected and to confirmed, type and severity accuracy, and time to resolve after the scenario's clearing phase.
+- **False incidents:** incidents outside scenario windows, per camera-hour, with suspected and confirmed counted separately.
 
 ## Event simulator
 

@@ -169,6 +169,7 @@ class NlpService:
                 "severity": r.severity,
                 "severity_confidence": r.severity_confidence,
                 "probabilities": r.probabilities,
+                "stage": r.stage,
                 "sentiment": r.sentiment,
                 "location_name": r.location_name,
                 "entities": [e.model_dump() for e in r.entities],

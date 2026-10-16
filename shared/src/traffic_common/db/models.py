@@ -206,6 +206,7 @@ class NlpResult(Base):
     severity: Mapped[Severity | None] = mapped_column(_enum(Severity, "severity"))
     severity_confidence: Mapped[float | None]
     probabilities: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    stage: Mapped[str] = mapped_column(String(20), server_default=text("'active'"))
     sentiment: Mapped[float | None]
     location_name: Mapped[str | None]
     entities: Mapped[list[dict[str, Any]]] = mapped_column(server_default=text("'[]'::jsonb"))
@@ -275,12 +276,22 @@ class Incident(Base):
     status: Mapped[IncidentStatus] = mapped_column(
         _enum(IncidentStatus, "incident_status"), server_default=IncidentStatus.SUSPECTED.value
     )
+    incident_type: Mapped[IncidentType] = mapped_column(
+        _enum(IncidentType, "incident_type"), server_default=IncidentType.NONE.value
+    )
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     severity: Mapped[Severity] = mapped_column(_enum(Severity, "severity"))
     fused_confidence: Mapped[float]
+    confidence_components: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    vision_degraded: Mapped[bool] = mapped_column(server_default=text("false"))
     start_time: Mapped[datetime]
+    suspected_at: Mapped[datetime | None]
+    confirmed_at: Mapped[datetime | None]
     end_time: Mapped[datetime | None]
     title: Mapped[str]
     description: Mapped[str | None] = mapped_column(Text)
+    # fusion_service's full incident state (rebuilt from here on restart) and history.
+    details: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -318,6 +329,7 @@ class IncidentEvidence(Base):
         ForeignKey("reports.id", ondelete="CASCADE")
     )
     weight: Mapped[float | None]  # contribution to the incident's fused confidence
+    details: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
     created_at: Mapped[datetime] = _created_at()
 
     incident: Mapped[Incident] = relationship(back_populates="evidence")

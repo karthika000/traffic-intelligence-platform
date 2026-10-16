@@ -324,6 +324,18 @@ def test_frozen_baseline_is_passed_to_the_model_and_held(service) -> None:
     assert state.frozen_baseline is None and state.active is None
 
 
+def test_frozen_baseline_is_released_after_max_hold(service) -> None:
+    svc, sent, _ = service
+    svc.cfg = AnomalyConfig(max_metric_age_seconds=10**9, max_hold_seconds=60)
+    cam = "cam-old-street"
+    t = feed(svc, cam, T0, 40)
+    t = feed(svc, cam, t, 8, avg_speed_kmh=4.0)
+    state = svc.cameras[cam]
+    assert state.active is not None and state.frozen_baseline is not None
+    feed(svc, cam, t, 10, avg_speed_kmh=4.0)  # now open for more than 60 s
+    assert state.frozen_baseline is None and state.active.baseline_released
+
+
 def test_escalation_publishes_update(service) -> None:
     svc, sent, engine = service
     from sqlalchemy import text

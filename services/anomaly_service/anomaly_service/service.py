@@ -324,6 +324,22 @@ class AnomalyService:
         level_row = congestion.predictor.predict(frame).iloc[-1]
         level = str(level_row["level"])
         confidence = _float(level_row.get("confidence"))
+        ts0 = frame["ts"].iloc[-1]
+        if (
+            state.active is not None
+            and state.frozen_baseline is not None
+            and (ts0 - state.active.started_at).total_seconds() > self.cfg.max_hold_seconds
+        ):
+            # A change that lasts this long is the new normal: let the rolling baseline take
+            # it in, so the score can come down and the alert end (it can't otherwise).
+            log.warning(
+                "camera %s: alert %s open for over %.0fs; releasing its frozen baseline",
+                state.camera_id,
+                state.active.anomaly_id,
+                self.cfg.max_hold_seconds,
+            )
+            state.frozen_baseline = None
+            state.active.baseline_released = True
         result = anomaly.predictor.predict(state.model_input(frame)).iloc[-1]
         self.stats.scored += 1
         valid = bool(result.get("valid", True))
@@ -466,6 +482,7 @@ class AnomalyService:
         if event is AlarmEvent.END:
             details["held_checks"] = state.tracker.held_checks
             details["updates"] = a.updates
+            details["baseline_released"] = a.baseline_released
         details.update(extra or {})
         message = Anomaly(
             anomaly_id=a.anomaly_id,

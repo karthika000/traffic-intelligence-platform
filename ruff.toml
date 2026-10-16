@@ -12,4 +12,4 @@ select = ["E", "F", "I", "B", "UP"]
 "services/event_simulator/event_simulator/reports.py" = ["E501"]
 
 [lint.isort]
-known-first-party = ["traffic_common", "video_ingest", "event_simulator", "cv_inference", "anomaly_service", "ml"]
+known-first-party = ["traffic_common", "video_ingest", "event_simulator", "cv_inference", "anomaly_service", "nlp_service", "fusion_service", "ml"]

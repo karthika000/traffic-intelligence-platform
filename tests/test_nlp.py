@@ -203,10 +203,10 @@ class CountingClassifier(KeywordIncidentClassifier):
 @pytest.fixture
 def nlp(scratch_database: str):
     from alembic import command
-    from nlp_service.config import NlpConfig
-    from nlp_service.service import NlpService
 
     from ml.registry import ModelManager
+    from nlp_service.config import NlpConfig
+    from nlp_service.service import NlpService
     from traffic_common.db import create_db_engine
     from traffic_common.db.migrate import alembic_config
     from traffic_common.db.seed import seed_cameras
@@ -294,3 +294,23 @@ def test_ner_spans_snap_to_whole_words() -> None:
     assert snap_to_words(text, j, j + 2) is None  # only a fragment
     assert snap_to_words(text, i, i + len("Faraday Memorial,")) == (i, i + 16)
     assert snap_to_words("at Elephant Park", 3, 16) == (3, 16)
+
+
+@pytest.mark.parametrize(
+    ("text", "stage"),
+    [
+        ("Road operator update: The collision on Park Lane has now been cleared.", "cleared"),
+        ("INCIDENT INC-123 CLOSED: debris near Old St. All lanes have reopened.", "cleared"),
+        ("finally moving again on City Road after a stranded van #breakdown", "cleared"),
+        ("A shunt near Apsley House is GONE, normal service has resumed", "cleared"),
+        ("Stand down INC-9: flooding at the Strand resolved. Delays are easing.", "cleared"),
+        ("lanes closed while it is cleared, long queues", "active"),
+        ("crash on Piccadilly, not cleared yet, police on scene", "active"),
+        ("recovery truck on the way, road will be reopened by 6pm", "active"),
+        ("serious crash on the Strand, all lanes closed", "active"),
+    ],
+)
+def test_report_stage_detects_clearing_reports(text, stage) -> None:
+    from ml.nlp.stage import report_stage
+
+    assert report_stage(text) == stage
