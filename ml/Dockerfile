@@ -5,10 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONPATH=/workspace \
-    MPLBACKEND=Agg
+    MPLBACKEND=Agg \
+    HF_HOME=/hf_cache
 
 # Heavy dependencies first so changes to shared/ don't reinstall torch.
-COPY ml/requirements-runtime.txt ml/requirements.txt /tmp/ml/
+COPY ml/requirements-runtime.txt ml/requirements-nlp.txt ml/requirements.txt /tmp/ml/
 RUN pip install -r /tmp/ml/requirements.txt && rm -rf /tmp/ml
 
 COPY shared/ /tmp/shared/

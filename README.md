@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference` and `anomaly_service` are implemented, with trained congestion and anomaly models. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service` and `nlp_service` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ anomaly_service ───────────────┘            ▼
 | `video_ingest` | Read camera / RTSP / file streams and publish frames |
 | `event_simulator` | Generate synthetic traffic events for dev and testing |
 | `cv_inference` | Vehicle/pedestrian detection, tracking, counting |
-| `nlp_service` | Entity and intent extraction from incident reports and feeds |
+| `nlp_service` | Incident type and severity, entities and camera matching for text reports |
 | `anomaly_service` | Anomaly detection over traffic metrics and events |
 | `fusion_service` | Combine vision, text and sensor signals into a unified state |
 | `summarizer` | Natural-language summaries of current conditions |
@@ -59,7 +59,7 @@ Created by `scripts/create_topics.ps1`, which `up.ps1` runs once Kafka is health
 | `detections` | CV detections and tracks |
 | `traffic.metrics` | Aggregated flow, speed and occupancy metrics |
 | `anomalies` | Output of `anomaly_service` |
-| `nlp.results` | Entities and intents extracted by `nlp_service` |
+| `nlp.results` | Incident type, severity, entities and matched camera per report (`nlp_service`) |
 | `incidents` | Fused incidents from `fusion_service` |
 | `summaries` | Text from `summarizer` |
 | `drift.alerts` | Model drift alerts from `ml/monitoring` |
@@ -245,12 +245,116 @@ Everything is logged to the MLflow experiment `traffic-anomaly-detector`, and th
 
 Both models are MLflow **pyfunc** models. They take raw rows (one per camera per 5 s window) and compute features themselves. The per-camera references, normalisation, error scales and thresholds are stored inside the model, and the `ml` package is bundled through `code_paths`, so serving can't drift from training.
 
+## Text models
+
+Three parts, all in `ml/nlp/`:
+
+- **Incident classifier:** incident type (8 classes) and severity (4 classes). It is trained in the `ml-trainer` like the other models and registered in MLflow.
+- **Entity extraction:** a pretrained NER model plus rules. It isn't trained here.
+- **Camera matching:** fuzzy matching against the simulator's gazetteers. It isn't trained here either.
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.training.train_nlp            # ~25 min on CPU
+docker compose run --rm ml-trainer python -m ml.training.train_nlp --skip-transformer   # baseline only, seconds
+```
+
+The training command takes these options:
+
+| Option | Effect |
+| --- | --- |
+| `--epochs N` | DistilBERT epochs (default 3) |
+| `--max-length N` | Token limit per report (default 64) |
+| `--batch-size N` | Training batch size |
+| `--learning-rate X` | DistilBERT learning rate |
+| `--val-fraction X` | Share of the train split held out for validation |
+| `--threads N` | PyTorch threads |
+| `--skip-entities` | Skip the NER and camera-matching evaluation |
+| `--limit N` | Subsample, for a quick smoke run |
+| `--no-promote` | Train and log, but don't register the model or move `@champion` |
+
+### Incident classifier
+
+Two candidates run as nested runs in the MLflow experiment `incident-text-classifier`:
+
+- **`tfidf-baseline`:** TF-IDF on word 1–2-grams and character 2–5-grams, with one logistic regression per task.
+- **`distilbert`:** `distilbert-base-uncased` with one shared encoder and two heads, so each report needs one forward pass. Fine-tuned on CPU with a 64-token limit, 3 epochs, per-batch padding, and the best epoch chosen by validation macro-F1.
+
+**Data split:** 15% of `reports_train.csv`, stratified, is held out for validation. `reports_test.csv` uses held-out phrasing and location forms, and is used for the final comparison.
+
+**What each run logs:**
+- params;
+- accuracy, and macro and weighted F1;
+- precision, recall and F1 for every class of both tasks;
+- confusion matrices (PNG and CSV);
+- accuracy by report source;
+- `worst_misclassified_test.csv`: wrong predictions, most confident first;
+- training time and inference time per report.
+
+**Selection:** the candidate with the higher mean test macro-F1 is registered as `incident-text-classifier` `@champion`. It is an MLflow pyfunc that bundles the tokenizer, encoder, heads and label maps. Input is a `text` column. Output is `incident_type`, `severity`, their confidences, and JSON `probabilities` for both tasks.
+
+Held-out test set, current champion (version 1):
+
+| Model | Task | Accuracy | Macro-F1 | Train time | Inference |
+| --- | --- | --- | --- | --- | --- |
+| TF-IDF + logistic regression | incident type | 0.900 | 0.903 | 16 s | 0.15 ms/report |
+| TF-IDF + logistic regression | severity | 0.792 | 0.782 | | |
+| DistilBERT (2 heads) | incident type | **0.955** | **0.956** | 22 min (3 epochs, 10 threads) | 20 ms/report |
+| DistilBERT (2 heads) | severity | **0.890** | **0.888** | | |
+
+Both candidates score about 0.999 on validation, because the validation split shares the training templates. The gap shows only on the test split's unseen phrasing. There, DistilBERT is clearly better, especially on severity.
+
+### Entities and camera matching
+
+- **Entities:**
+  - Locations come from `dslim/bert-base-NER`. LOC spans are kept; ORG and MISC spans are kept only if the gazetteer confirms them.
+  - Gazetteer matches are added where NER misses. The cased NER model misses most lowercase driver and social posts.
+  - Vehicle types, lane information and times come from rules.
+  - Entity labels are `LOCATION`, `VEHICLE`, `LANE` and `TIME`.
+- **Camera matching:**
+  - It reuses `traffic_common.gazetteer`, the data the event simulator writes reports from: official names, streets, landmarks, abbreviations, misspellings and hashtags. Gazetteers for other cameras are derived from their name.
+  - Text and aliases are normalised the same way: lowercase, "&" becomes "and", standard abbreviations are expanded (St, Rd, Sq, Rbt, Pk, Cnr, X), and hashtags are split.
+  - Each alias is compared with word windows of the text by fuzzy ratio (at least 0.85). Short aliases such as HPC and E&C must match exactly.
+  - Confidence drops when a second camera scores almost as well. Below 0.7 the result is "no camera".
+  - The test split's held-out location forms are never read, and a test checks that.
+
+Results on the held-out test set:
+
+| Measure | NER only | Gazetteer only | Combined (used) |
+| --- | --- | --- | --- |
+| Location found, overlapping the labelled mention | 0.65 | 0.81 | **0.93** |
+| Location exact match | 0.36 | 0.66 | 0.75 |
+| Precision of extracted location spans | 0.95 | 0.93 | 0.91 |
+
+| Camera matching | Value |
+| --- | --- |
+| Accuracy (no camera counts as wrong) | **0.871** |
+| Coverage (a camera was returned) | 0.872 |
+| Precision when a camera was returned | 0.999 |
+| By source: driver / police / operator / social media | 0.83 / 0.84 / 0.93 / 0.90 |
+
+Almost every miss is a place name the gazetteer doesn't contain, such as "Brook Drive" or "Duke of Wellington Place". These come from the test split's held-out location forms, so the matcher returns no camera rather than guessing.
+
+### Online evaluation
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.evaluation.nlp_online --hours 24
+```
+
+The command joins `nlp_results` with the simulator's ground truth in `simulated_reports` for the last N hours.
+
+- **Measures:** incident and severity accuracy and macro-F1, plus camera accuracy, coverage and precision. Each is reported overall and per source style: driver, police, operator, social media.
+- **Lost reports:** it also counts reports that have no result.
+- **Logging:** results go to the `incident-text-classifier` experiment, tagged `eval=online`.
+- **Options:** `--model-version` limits it to one version; `--no-mlflow` only prints.
+
 ## Model limitations
 
 - **The congestion classifier learns rules, not ground truth.** Its labels are derived by rule. Real data gets weak labels from thresholds on speed ratio, density ratio and stopped vehicles (`ml/labels.py`), and synthetic data is labelled by the same rule applied to the generator's noise-free state. Its near-perfect test scores (macro-F1 about 0.99) mostly show that it reproduces that rule. They are not evidence of accuracy against human-labelled traffic states, and there is no such evaluation yet.
 - **Real data is short and partly synthetic.** It covers about a day. The camera metrics come from looped sample videos, and the loop-detector readings come from the event simulator. Simulated incidents therefore show up only in the sensor channel, never in the video.
 - **The anomaly baseline is short-term.** The detector compares each camera with its own last ~10 minutes, frozen while an alert is active. It doesn't know what is normal for the time of day. A slowdown that builds over more than about 10 minutes, or an incident during an already-congested peak, is detected late or not at all; the evening-peak scenario runs were mostly missed.
 - **A time-of-day baseline is planned** once more real data exists, ideally several weeks per camera, so each camera can be compared with its usual traffic at that hour and weekday.
+- **The text models have only seen simulated reports.** Reports come from templates with injected noise. The test split's unseen phrasing is a fairer check than validation, but real reports will be more varied, and accuracy on them is unknown until real labelled reports exist.
+- **Camera matching only knows the gazetteer.** Places outside it (side streets, new landmarks) get no camera, and nothing is geocoded. The camera a report is tagged with by its source (the simulator sets one) is recorded in `details.reported_camera_id` for evaluation, but never used for matching.
 - **Camera artefacts cause false alarms.** Elephant & Castle's parked vans flicker in and out of "stopped" and cause most real false alarms (about 2 per camera-hour overall). Per-camera zone configs that exclude parking areas would reduce that.
 
 ## Anomaly service
@@ -283,6 +387,23 @@ SELECT camera_id, anomaly_type, hints, round(score::numeric, 2) AS score, status
 FROM anomalies ORDER BY detected_at DESC LIMIT 10;
 SELECT * FROM camera_congestion;
 ```
+
+## NLP service
+
+nlp_service consumes `reports.text` as consumer group `nlp-service`.
+
+- **Batching:** reports that are already waiting are handled together, up to `NLP_MAX_BATCH` (32). The consumer never waits to fill a batch. If a batch fails, its reports are retried one by one, with the usual dead-lettering.
+- **Per batch:**
+  - Each report is stored in `reports`.
+  - The champion classifier runs once on the whole batch, and so does NER (`NER_MODEL`, default `dslim/bert-base-NER`).
+  - Each report then gets rule-based entities and camera matching on its text.
+  - The result is stored in `nlp_results` and published to `nlp.results` as an `NLPResult`. It carries the incident type and severity with their confidences, the full `probabilities`, entities, `camera_id` with `camera_confidence` (or none), `location_name`, `model_version`, `model_versions` (classifier, NER commit, matcher) and `details` (match details, batch size, the report's own camera tag).
+- **Redelivery:** a report already analysed by the current model version is skipped.
+- **Models:** the champion comes from the MLflow registry and is reloaded when `@champion` moves (`MODEL_REFRESH_SECONDS`). Each loaded version is recorded in `model_versions`, and so is the NER model. Until a classifier is registered, a keyword fallback (`incident-text-rules`) keeps the service running and says so in its logs.
+- **Threads:** capped to 2, as in anomaly_service.
+- **Downloads:** Hugging Face downloads live in the `hf_cache` volume, shared with `ml-trainer`, so restarts don't download again.
+- **Speed:** about 90 ms per report on CPU with NER, most of it NER.
+- **Settings:** `NLP_MAX_BATCH`, `NLP_NER_ENABLED`, `NER_MODEL`, `NLP_MATCH_MIN_SCORE` (0.85) and `NLP_MATCH_MIN_CONFIDENCE` (0.7).
 
 ## Event simulator
 

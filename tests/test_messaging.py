@@ -310,3 +310,49 @@ def test_process_shutdown_runs_registered_callbacks(scratch: Scratch) -> None:
     threading.Timer(1.0, c.stop).start()
     c.run()
     assert ran == ["flushed"]
+
+
+def test_batch_handler_gets_waiting_messages_together(scratch: Scratch) -> None:
+    with scratch.producer() as p:
+        for i in range(7):
+            p.send(scratch.topic, metrics(count=i))
+    batches: list[list[int]] = []
+    stop = threading.Event()
+    c = scratch.consumer(
+        None,
+        stop,
+        batch_handler=lambda ms: batches.append([m.vehicle_count for m in ms]),
+        max_batch=4,
+    )
+    run_until(c, stop, lambda: sum(map(len, batches)) == 7)
+
+    assert [n for b in batches for n in b] == list(range(7))  # in order, each once
+    assert max(map(len, batches)) > 1 and all(len(b) <= 4 for b in batches)
+    assert c.stats.processed == 7 and c.stats.batches >= 1
+    assert scratch.committed_offset() == 7
+
+
+def test_failed_batch_falls_back_to_one_by_one(scratch: Scratch) -> None:
+    with scratch.producer() as p:
+        for cam in ("cam-1", "cam-bad", "cam-3"):
+            p.send(scratch.topic, metrics(cam))
+    seen: list[list[str]] = []
+
+    def handle(ms: list[TrafficMetrics]) -> None:
+        if any(m.camera_id == "cam-bad" for m in ms):
+            raise RuntimeError("poison message in batch")
+        seen.append([m.camera_id for m in ms])
+
+    stop = threading.Event()
+    c = scratch.consumer(None, stop, batch_handler=handle, max_batch=10, max_retries=1)
+    run_until(c, stop, lambda: c.stats.processed == 2 and c.stats.dead_lettered == 1)
+
+    assert sorted(cam for b in seen for cam in b) == ["cam-1", "cam-3"]
+    assert scratch.committed_offset() == 3
+    [dead] = scratch.read(scratch.dlq, 1)
+    assert dead.key() == b"cam-bad"
+
+
+def test_consumer_needs_a_handler(kafka_bootstrap: str) -> None:
+    with pytest.raises(ValueError, match="handler"):
+        TypedConsumer(["anomalies"], "g", None, kafka_bootstrap)

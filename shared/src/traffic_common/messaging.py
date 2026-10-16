@@ -10,6 +10,9 @@ TypedConsumer
     dead-letter topic (``dlq.<group>``). Handler failures are retried with exponential
     backoff; messages that fail validation go to the dead-letter topic immediately.
     Stops on SIGINT/SIGTERM via the shared shutdown event in ``traffic_common.lifecycle``.
+    With ``batch_handler`` and ``max_batch`` > 1, messages that are already waiting are handed
+    over together (up to max_batch, never waiting to fill a batch); if a batch fails, its
+    messages are retried one by one with the usual retries and dead-lettering.
 """
 
 import logging
@@ -34,6 +37,7 @@ log = logging.getLogger(__name__)
 
 SchemaMap = Mapping[str, type[KafkaMessage]]
 Handler = Callable[[KafkaMessage], None]
+BatchHandler = Callable[[list[KafkaMessage]], None]
 
 _MAX_ERROR_HEADER = 2_000
 
@@ -147,6 +151,7 @@ class ConsumerStats:
     processed: int = 0
     retries: int = 0
     dead_lettered: int = 0
+    batches: int = 0  # batches handled together (batch_handler)
 
 
 class DeadLetterError(RuntimeError):
@@ -158,9 +163,11 @@ class TypedConsumer:
         self,
         topics: Sequence[str],
         group_id: str,
-        handler: Handler,
+        handler: Handler | None,
         bootstrap_servers: str,
         *,
+        batch_handler: BatchHandler | None = None,
+        max_batch: int = 1,
         schemas: SchemaMap = TOPIC_SCHEMAS,
         max_retries: int = 3,
         initial_backoff: float = 0.5,
@@ -177,7 +184,11 @@ class TypedConsumer:
         self.group_id = group_id
         self.dead_letter_topic = dead_letter_topic(group_id)
         self.stats = ConsumerStats()
-        self._handler = handler
+        if handler is None and batch_handler is None:
+            raise ValueError("a handler or a batch_handler is required")
+        self._batch_handler = batch_handler
+        self._max_batch = max(1, max_batch) if batch_handler else 1
+        self._handler = handler or (lambda value: batch_handler([value]))
         self._schemas = schemas
         self._max_retries = max_retries
         self._initial_backoff = initial_backoff
@@ -215,16 +226,55 @@ class TypedConsumer:
         try:
             while not self._stop.is_set():
                 msg = self._consumer.poll(self._poll_timeout)
-                if msg is None:
+                if msg is None or not self._ok(msg):
                     continue
-                if msg.error():
-                    if msg.error().fatal():
-                        raise KafkaException(msg.error())
-                    log.warning("consumer error: %s", msg.error())
+                if self._max_batch == 1:
+                    self._process(msg)
                     continue
-                self._process(msg)
+                # Whatever else is already waiting (timeout 0: never wait to fill a batch).
+                more = self._consumer.consume(num_messages=self._max_batch - 1, timeout=0)
+                self._process_batch([msg, *(m for m in more if self._ok(m))])
         finally:
             self._close()
+
+    @staticmethod
+    def _ok(msg: Message) -> bool:
+        if msg.error():
+            if msg.error().fatal():
+                raise KafkaException(msg.error())
+            log.warning("consumer error: %s", msg.error())
+            return False
+        return True
+
+    def _process_batch(self, msgs: list[Message]) -> None:
+        if len(msgs) == 1:
+            self._process(msgs[0])
+            return
+        try:
+            values = [self._schemas[m.topic()].model_validate_json(m.value() or b"") for m in msgs]
+        except ValidationError:
+            values = None  # let the one-by-one path dead-letter the invalid message(s)
+        if values is not None:
+            try:
+                assert self._batch_handler is not None
+                self._batch_handler(values)
+            except Exception as exc:
+                log.warning(
+                    "batch of %d failed (%s); processing its messages one by one", len(msgs), exc
+                )
+            else:
+                last: dict[tuple[str, int], Message] = {}
+                for m in msgs:
+                    last[(m.topic(), m.partition())] = m  # offsets only grow per partition
+                for m in last.values():
+                    self._commit(m)
+                self.stats.processed += len(msgs)
+                self.stats.batches += 1
+                return
+        for m in msgs:
+            if self._stop.is_set():
+                return  # uncommitted: redelivered after restart
+            self._process(m)
 
     def _process(self, msg: Message) -> None:
         schema = self._schemas[msg.topic()]

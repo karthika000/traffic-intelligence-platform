@@ -16,6 +16,9 @@ def setup(threads: int = 6) -> None:
         level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s"
     )
     logging.getLogger("mlflow").setLevel(logging.WARNING)
+    # One INFO line per Hugging Face Hub request (huggingface_hub resets the httpx level).
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(lambda record: not record.name.startswith("httpx"))
     try:
         import torch
 
@@ -38,10 +41,12 @@ def time_split(df: pd.DataFrame, fractions: tuple[float, ...]) -> pd.Series:
     return pd.Series(labels, index=df.index, dtype=object)
 
 
-def pip_requirements() -> list[str]:
+def pip_requirements(*files: str) -> list[str]:
     """The model runtime pins, so serving installs exactly what training used."""
-    lines = (ML_DIR / "requirements-runtime.txt").read_text(encoding="utf-8").splitlines()
-    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+    lines = []
+    for name in files or ("requirements-runtime.txt",):
+        lines += (ML_DIR / name).read_text(encoding="utf-8").splitlines()
+    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith(("#", "-r"))]
 
 
 def register(run_id: str, name: str, alias: str, description: str, tags: dict[str, str]) -> str:

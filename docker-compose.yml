@@ -54,6 +54,7 @@ services:
     build: { context: ., dockerfile: services/nlp_service/Dockerfile }
     volumes:
       - ./models:/models:ro
+      - hf_cache:/hf_cache   # NER weights, downloaded once
 
   anomaly_service:
     <<: *python-service
@@ -232,6 +233,7 @@ services:
     volumes:
       - ./ml:/workspace/ml
       - ./data:/workspace/data
+      - hf_cache:/hf_cache   # Hugging Face downloads (DistilBERT, NER), shared with nlp_service
     depends_on:
       postgres:
         condition: service_healthy
@@ -267,6 +269,7 @@ volumes:
   frames:
   annotated:
   weights:
+  hf_cache:
   kafka_data:
   postgres_data:
   mlflow_artifacts:

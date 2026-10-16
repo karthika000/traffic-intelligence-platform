@@ -1,2 +1,3 @@
 # Service-specific dependencies for nlp_service.
-# traffic-common (shared/) is installed separately by the Dockerfile.
+# The model runtime comes from ml/requirements-runtime.txt and ml/requirements-nlp.txt, and
+# traffic-common from shared/ (see Dockerfile).

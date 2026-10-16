@@ -1,0 +1,7 @@
+# Text models (incident classifier, NER, camera matching): installed by the ml-trainer image,
+# nlp_service and the tests image, on top of requirements-runtime.txt (torch, scikit-learn).
+transformers==5.20.1
+tokenizers==0.23.3
+huggingface-hub==2.2.0
+safetensors==0.8.0
+rapidfuzz==3.14.6

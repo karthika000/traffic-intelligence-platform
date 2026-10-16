@@ -22,6 +22,7 @@ from traffic_common.enums import (
     CongestionLevel,
     DriftType,
     IncidentStatus,
+    IncidentType,
     ReportSource,
     Severity,
     SummaryScope,
@@ -202,15 +203,27 @@ class Entity(BaseModel):
 
 
 class NLPResult(KafkaMessage):
+    """What nlp_service made of one TextReport: incident type and severity (with confidences
+    and the full ``probabilities`` per task: {"incident_type": {label: p}, "severity": ...}),
+    extracted entities, and the camera it was matched to (``camera_id`` is None when no camera
+    matched confidently; ``location_name`` is the text it matched on)."""
+
     report_id: UUID
-    camera_id: CameraId | None = None
-    category: ShortStr
+    source: ReportSource | None = None  # copied from the report
+    incident_type: IncidentType
+    incident_confidence: Probability
     severity: Severity | None = None
+    severity_confidence: Probability | None = None
+    probabilities: dict[str, dict[str, Probability]] = Field(default_factory=dict)
     sentiment: float | None = Field(default=None, ge=-1.0, le=1.0)
-    location_name: ShortStr | None = None
     entities: list[Entity] = Field(default_factory=list)
+    camera_id: CameraId | None = None
+    camera_confidence: Probability | None = None
+    location_name: ShortStr | None = None
     model_name: ShortStr
     model_version: ShortStr
+    model_versions: dict[str, str] = Field(default_factory=dict)  # every model involved
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- analytics

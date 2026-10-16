@@ -199,14 +199,20 @@ class NlpResult(Base):
     id: Mapped[int] = _pk()
     message_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
     report_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reports.id", ondelete="CASCADE"))
-    camera_id: Mapped[str | None] = _camera_fk(nullable=True)
-    category: Mapped[str] = mapped_column(String(50))
+    camera_id: Mapped[str | None] = _camera_fk(nullable=True)  # matched camera
+    camera_confidence: Mapped[float | None]
+    incident_type: Mapped[IncidentType] = mapped_column(_enum(IncidentType, "incident_type"))
+    incident_confidence: Mapped[float | None]
     severity: Mapped[Severity | None] = mapped_column(_enum(Severity, "severity"))
+    severity_confidence: Mapped[float | None]
+    probabilities: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
     sentiment: Mapped[float | None]
     location_name: Mapped[str | None]
     entities: Mapped[list[dict[str, Any]]] = mapped_column(server_default=text("'[]'::jsonb"))
     model_name: Mapped[str]
     model_version: Mapped[str] = mapped_column(String(100))
+    model_versions: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    details: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
     processed_at: Mapped[datetime]
 
     __table_args__ = (
