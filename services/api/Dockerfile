@@ -14,6 +14,9 @@ RUN pip install /tmp/shared && rm -rf /tmp/shared
 COPY services/api/requirements.txt .
 RUN pip install -r requirements.txt
 
+# The scenarios the event simulator can run (listed and validated before triggering).
+COPY services/event_simulator/scenarios/ /app/scenarios/
 COPY services/api/ .
 
+EXPOSE 8000
 CMD ["python", "main.py"]

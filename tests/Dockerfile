@@ -18,9 +18,10 @@ COPY services/event_simulator/requirements.txt /tmp/requirements/event_simulator
 COPY services/cv_inference/requirements.txt /tmp/requirements/cv_inference.txt
 COPY ml/requirements-runtime.txt /tmp/requirements/ml-runtime.txt
 COPY ml/requirements-nlp.txt /tmp/requirements/ml-nlp.txt
+COPY services/api/requirements.txt /tmp/requirements/api.txt
 RUN pip install -r /tmp/requirements/video_ingest.txt -r /tmp/requirements/event_simulator.txt \
         -r /tmp/requirements/cv_inference.txt -r /tmp/requirements/ml-runtime.txt \
-        -r /tmp/requirements/ml-nlp.txt \
+        -r /tmp/requirements/ml-nlp.txt -r /tmp/requirements/api.txt \
     && pip uninstall -y opencv-python \
     && pip install --no-deps --force-reinstall "opencv-python-headless>=4.10,<5" \
     && rm -rf /tmp/requirements

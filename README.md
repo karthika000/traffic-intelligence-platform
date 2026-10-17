@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service`, `fusion_service` and `summarizer` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service`, `fusion_service`, `summarizer` and `api` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
 
 ## Architecture
 
@@ -536,6 +536,54 @@ Results on the pinned reference set (40 contexts: 20 stored incidents and 20 sce
 - Qwen2.5-1.5B was far too slow for this CPU budget: about 6 GB in full precision in a 7.5 GB Docker VM.
 - Only configurations with a guard pass rate of at least 0.9 can be promoted. Among those, the template has the best published ROUGE-L, so it stays champion (`incident-summarizer` v3).
 - These numbers are lower than in earlier runs because the facts and references now use loop-detector speeds. Part of the template's lead comes from the references being written from the same facts. To try a model in the service anyway, set the `@champion` alias to a registered model configuration.
+
+## API
+
+`api` is a FastAPI service on port `API_PORT` (8001). It uses async SQLAlchemy with psycopg 3 against Postgres. Interactive documentation is at <http://localhost:8001/docs>. Records the platform already has a message schema for (incidents, summaries, anomalies, NLP results, reports, metrics) are returned in those shared schemas (`traffic_common.schemas`), so REST and the WebSocket use the same shapes. Lists are paginated with `?page=` and `?page_size=` (at most 200) and return `{items, total, page, page_size}`.
+
+| Endpoint | What it returns |
+| --- | --- |
+| `GET /api/v1/cameras` | Every camera with location, current congestion level, latest metrics window, open incident count, and whether vision is degraded (with the reasons) |
+| `GET /api/v1/cameras/{id}?minutes=60&resolution=60` | Zone config, the metrics history aggregated in SQL into `resolution`-second buckets, and recent anomalies, including system-wide ones |
+| `GET /api/v1/incidents?status=&camera_id=&incident_type=&severity=&since=&until=` | Incidents, newest first |
+| `GET /api/v1/incidents/{id}` | The incident with its confidence breakdown, every published version, linked evidence (anomalies, reports with their NLP results, metric windows, evidence weights) and all summaries with their generation path |
+| `GET /api/v1/reports?camera_id=&incident_type=&unlocated=&since=` | Reports with their latest NLP result. `unlocated=true` gives those matched to no camera. The default range is the last 24 h. |
+| `GET /api/v1/analytics/volume?hours=24` | Hourly vehicles (the sum of per-window unique tracks) and mean speed per camera |
+| `GET /api/v1/analytics/congestion?hours=24&bucket_minutes=60` | Congestion level counts and shares per camera and time bucket, from `congestion_history` (written by anomaly_service on every check) |
+| `GET /api/v1/analytics/incidents?hours=168` | Incident counts by type, severity and status |
+| `GET /api/v1/models` | The version in service of every model (`model_versions`), with its MLflow champion, the champion run's metrics, and the latest run in the experiment of the same name (for example an online evaluation). MLflow is read over REST and cached for 60 s. If MLflow is unreachable, `mlflow` is null. |
+| `GET /api/v1/scenarios`, `GET /api/v1/scenarios/runs` | The simulator's scenarios (from its YAML files) and recent runs |
+| `POST /api/v1/scenarios/{name}/trigger` `{"camera_id": "...", "time_scale": 6}` | Validates the scenario and camera, publishes a `SimulatorCommand` to `simulator.control`, and returns `202` with the `scenario_id` |
+| `GET /api/v1/frames/{camera}/latest.jpg` | The latest annotated frame, sent with no-cache headers and `X-Frame-Time` |
+| `GET /api/v1/frames/{camera}/stream.mjpg?fps=5` | An MJPEG stream (`multipart/x-mixed-replace`) that pushes each new frame cv_inference writes. The rate is capped by `API_MJPEG_MAX_FPS`, and the last frame is resent every 10 s when nothing new arrives. |
+
+**Live updates: `ws://localhost:8001/ws/live`.**
+
+- **Consumer:** a background Kafka consumer runs with a group unique to the API process, starting at the latest offsets. It reads `incidents`, `summaries`, `anomalies`, `traffic.metrics` and `nlp.results`.
+- **Envelopes:** each message is sent as `{"type": "<topic>", "camera_ids": [...], "ts": ..., "data": {...}}`, where `data` is the shared schema.
+- **Subscribing:** connect with `?topics=incidents,summaries&cameras=cam-old-street`, or send `{"action": "subscribe", "topics": [...], "cameras": [...]}` later. Messages without a camera, such as unlocated reports, go to camera-filtered clients too.
+- **Rate limits and heartbeats:** `traffic.metrics` is throttled per camera (`API_WS_METRICS_INTERVAL_SECONDS`, 2). Idle connections get `heartbeat` messages (`API_WS_HEARTBEAT_SECONDS`, 15).
+- **Slow clients:** each client has its own queue (`API_WS_QUEUE_SIZE`, 500). A slow client loses its oldest messages and is told how many (`{"type": "dropped", "count": n}`). One that keeps falling behind is disconnected. Other clients are never held up.
+
+**Health:**
+- `/health` reports the process is up.
+- `/ready` checks that Postgres and Kafka are reachable and the live consumer is running. It returns 503 otherwise, and it's the container healthcheck: the dashboard starts once the API is ready.
+
+**CORS:** only the origins in `API_CORS_ORIGINS` are allowed (the dashboard on port 5173 by default).
+
+**Errors:** every error has the same shape, whether it's a route's 404, a validation error or an unhandled exception:
+
+```json
+{"error": {"status": 422, "code": "validation_error", "message": "invalid request",
+           "request_id": "8b81b8b0fe604003",
+           "details": [{"location": ["query", "status"], "message": "Input should be ...", "type": "enum"}]}}
+```
+
+The codes are `not_found`, `validation_error`, `internal_error` and so on. `details` is only present for validation errors. A 500 never includes internal error text.
+
+**Request logging:** every response carries `X-Request-ID` (yours, if you sent a well-formed one) and `Server-Timing: app;dur=<ms>`. Each request is logged as one JSON line on `api_service.access` with the request id, method, path, query, status, duration and client. `/health` and `/ready` log at DEBUG, so the healthcheck doesn't flood the log.
+
+**Docs:** OpenAPI is at `/docs` (Swagger UI) and `/openapi.json`. Endpoints are grouped by tag, with descriptions, request and response examples, and the error schema.
 
 ## Event simulator
 

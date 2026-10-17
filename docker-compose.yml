@@ -80,6 +80,12 @@ services:
     volumes:
       - frames:/data/frames:ro
       - annotated:/data/annotated:ro
+    healthcheck:   # /ready: Postgres and Kafka reachable, live consumer running
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
 
   dashboard:
     build: { context: ./dashboard }
@@ -91,7 +97,9 @@ services:
     volumes:
       - ./dashboard:/app
       - /app/node_modules
-    depends_on: [api]
+    depends_on:
+      api:
+        condition: service_healthy
     networks: [traffic]
 
   # -------------------------------------------------------------- infrastructure

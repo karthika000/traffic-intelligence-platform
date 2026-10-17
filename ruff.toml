@@ -1,7 +1,7 @@
 # One lint configuration for the whole repo (services, shared, tests, ml).
 line-length = 100
 target-version = "py311"
-src = [".", "shared/src", "tests", "services/video_ingest", "services/event_simulator", "services/cv_inference", "services/anomaly_service"]
+src = [".", "shared/src", "tests", "services/video_ingest", "services/event_simulator", "services/cv_inference", "services/anomaly_service", "services/nlp_service", "services/fusion_service", "services/summarizer", "services/api"]
 extend-exclude = ["**/migrations/versions/*.py"]
 
 [lint]
@@ -11,5 +11,9 @@ select = ["E", "F", "I", "B", "UP"]
 # Phrase tables: one pool per line is easier to read and edit than wrapped lists.
 "services/event_simulator/event_simulator/reports.py" = ["E501"]
 
+[lint.flake8-bugbear]
+# FastAPI declares dependencies and parameters as argument defaults; that's the idiom.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]
+
 [lint.isort]
-known-first-party = ["traffic_common", "video_ingest", "event_simulator", "cv_inference", "anomaly_service", "nlp_service", "fusion_service", "summarizer_service", "ml"]
+known-first-party = ["traffic_common", "video_ingest", "event_simulator", "cv_inference", "anomaly_service", "nlp_service", "fusion_service", "summarizer_service", "api_service", "ml"]

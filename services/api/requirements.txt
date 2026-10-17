@@ -1,2 +1,6 @@
 # Service-specific dependencies for api.
 # traffic-common (shared/) is installed separately by the Dockerfile.
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+PyYAML==6.0.3

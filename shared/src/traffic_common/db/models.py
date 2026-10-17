@@ -468,6 +468,23 @@ class CameraCongestion(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
+class CongestionHistory(Base):
+    """Every congestion classification (one row per camera per check), for analytics over time."""
+
+    __tablename__ = "congestion_history"
+
+    id: Mapped[int] = _pk()
+    camera_id: Mapped[str] = _camera_fk()
+    window_end: Mapped[datetime]
+    level: Mapped[CongestionLevel] = mapped_column(_enum(CongestionLevel, "congestion_level"))
+    confidence: Mapped[float | None]
+
+    __table_args__ = (
+        Index("ix_congestion_history_camera_id_window_end", "camera_id", "window_end"),
+        Index("ix_congestion_history_window_end", "window_end"),
+    )
+
+
 # ------------------------------------------------------------------ simulation ground truth
 # Written only by event_simulator. Kept apart from the operational tables (reports, incidents, ...)
 # so labels never mix with what the platform itself ingests and infers.

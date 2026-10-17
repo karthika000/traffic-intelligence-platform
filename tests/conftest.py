@@ -6,6 +6,7 @@ import signal
 import socket
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from sqlalchemy.engine import make_url
@@ -59,9 +60,8 @@ def postgres_url() -> str:
     return url
 
 
-@pytest.fixture
-def scratch_database(postgres_url: str) -> Iterator[str]:
-    """A throwaway database on the same server, so tests never touch `traffic`."""
+@contextmanager
+def _scratch(postgres_url: str) -> Iterator[str]:
     import psycopg
 
     base = make_url(postgres_url)
@@ -76,3 +76,17 @@ def scratch_database(postgres_url: str) -> Iterator[str]:
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture
+def scratch_database(postgres_url: str) -> Iterator[str]:
+    """A throwaway database on the same server, so tests never touch `traffic`."""
+    with _scratch(postgres_url) as url:
+        yield url
+
+
+@pytest.fixture(scope="module")
+def scratch_database_module(postgres_url: str) -> Iterator[str]:
+    """One throwaway database shared by a module's tests (seeded once)."""
+    with _scratch(postgres_url) as url:
+        yield url

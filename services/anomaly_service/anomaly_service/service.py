@@ -25,7 +25,7 @@ from anomaly_service.state import (
 from ml.alarm import AlarmEvent, AlarmTracker
 from ml.features import SEQUENCE_LENGTH, WINDOW_S, current_baselines
 from traffic_common.db.models import Anomaly as AnomalyRow
-from traffic_common.db.models import CameraCongestion, SensorReading
+from traffic_common.db.models import CameraCongestion, CongestionHistory, SensorReading
 from traffic_common.db.registry import record_model_version
 from traffic_common.schemas import Anomaly, KafkaMessage, RawEvent, TrafficMetrics
 from traffic_common.topics import Topic
@@ -613,6 +613,11 @@ class AnomalyService:
         try:
             with self.engine.begin() as conn:
                 conn.execute(stmt)
+                conn.execute(
+                    insert(CongestionHistory).values(
+                        camera_id=camera_id, window_end=ts, level=level, confidence=confidence
+                    )
+                )
         except IntegrityError:
             self._warn_once(camera_id, "congestion for a camera not in the cameras table")
         except Exception as exc:
