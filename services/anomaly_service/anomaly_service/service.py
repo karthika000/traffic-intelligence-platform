@@ -35,6 +35,10 @@ SEVERITY_ORDER = ["low", "medium", "high", "critical"]
 # Cameras whose latest window is within this of the newest one count as "the same check".
 SYSTEM_FRESH_S = 3 * WINDOW_S
 SYSTEM_MODEL = ("system-health-rules", "1")
+# Model inputs that measure the camera pipeline rather than traffic. Their normal error scale is
+# tiny (cv_inference almost always processes the same number of frames per window), so a
+# one-frame wobble can top the score; they only count when the health check sees a real drop.
+HEALTH_FEATURES = {"frames_rel", "mean_confidence", "camera_speed_present"}
 
 
 @dataclass
@@ -46,6 +50,7 @@ class Stats:
     started: int = 0
     updated: int = 0
     ended: int = 0
+    health_noise: int = 0  # checks over threshold only through healthy pipeline features
     db_errors: int = 0
 
     def reset(self) -> str:
@@ -340,10 +345,12 @@ class AnomalyService:
             )
             state.frozen_baseline = None
             state.active.baseline_released = True
-        result = anomaly.predictor.predict(state.model_input(frame)).iloc[-1]
+        result = anomaly.predictor.predict(state.model_input(frame)).iloc[-1].copy()
         self.stats.scored += 1
         valid = bool(result.get("valid", True))
         score, threshold = _float(result["score"]), _float(result["threshold"])
+        if valid and score is not None and threshold is not None:
+            score = self._vet_health(state, result, score, threshold)
         versions = {congestion.name: congestion.version, anomaly.name: anomaly.version}
         state.congestion_level = level
         self._upsert_congestion(
@@ -403,6 +410,31 @@ class AnomalyService:
                     versions,
                     ts,
                 )
+
+    def _vet_health(self, state: CameraState, result, score: float, threshold: float) -> float:
+        """Hold the model's camera_degraded explanation to the health check (frames or
+        detection confidence well below the camera's baseline, the same test as the
+        system-wide check). Without a real drop the hint is removed, and a score that only
+        crosses the threshold through pipeline features is pipeline noise: it's capped just
+        below the threshold so it neither starts nor holds an alert."""
+        if state.health is not None and state.health.dropped:
+            return score
+        hints = json.loads(result.get("hints") or "[]")
+        if "camera_degraded" in hints:
+            hints = [h for h in hints if h != "camera_degraded"]
+            result["hints"] = json.dumps(hints)
+        top = str(result.get("top_feature") or "")
+        if score >= threshold and not hints and top in HEALTH_FEATURES:
+            self.stats.health_noise += 1
+            log.debug(
+                "camera %s: score %.2f >= %.2f only through %s with a healthy pipeline; ignored",
+                state.camera_id,
+                score,
+                threshold,
+                top,
+            )
+            return min(score, threshold * 0.999)
+        return score
 
     def _refresh_active(self, a: ActiveAnomaly, result, peak: float, threshold: float) -> None:
         """Take the model's latest explanation; severity only ever rises within an episode."""

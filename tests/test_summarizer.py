@@ -69,7 +69,7 @@ def test_facts_text_lists_only_known_facts() -> None:
         "Location: Hyde Park Corner - Piccadilly approach (Hyde Park Corner, London W1J)" in facts
     )
     assert "Incident: accident, severity critical, status confirmed" in facts
-    assert "Started: 18:48, 6 minutes ago" in facts  # London time
+    assert "Started: 18:48 BST, 6 minutes ago" in facts  # London time, with its zone
     assert "loop detector speed 5 km/h against 30 km/h normally (17 percent)" in facts
     assert "camera speed 6 km/h against 24 km/h normally (25 percent)" in facts  # agrees
     assert "3 stopped vehicles" in facts and "1 pedestrians in the roadway" in facts
@@ -248,6 +248,22 @@ def test_template_is_short_faithful_and_complete() -> None:
             assert "Recommended action:" in summary
             verdict = faithfulness.check(f"{headline}\n{summary}", ctx)
             assert verdict.passed, (status, severity, verdict.violations)
+
+
+def test_local_time_names_the_zone() -> None:
+    from zoneinfo import ZoneInfo
+
+    from ml.summarize.context import local_time
+
+    assert local_time(T0) == "18:48 BST"  # DISPLAY_TIMEZONE defaults to Europe/London
+    assert local_time(datetime(2026, 12, 1, 17, 48, tzinfo=UTC)) == "17:48 GMT"
+    assert local_time(T0, ZoneInfo("America/New_York")) == "13:48 EDT"
+
+
+def test_template_summary_shows_the_zone() -> None:
+    from ml.summarize.template import template_summary
+
+    assert "since 18:48 BST" in template_summary(context())
 
 
 # ----------------------------------------------------------------------------- faithfulness

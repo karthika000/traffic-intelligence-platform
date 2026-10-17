@@ -16,7 +16,8 @@ _FEATURE_HINTS = {
     "mean_confidence": ("camera_degraded", "low"),
     "frames": ("camera_degraded", "low"),
     "camera_speed_present": ("camera_degraded", "low"),
-    "vehicle_count": ("camera_degraded", "low"),
+    # Fewer vehicles than usual is quiet traffic, not a failing camera: vehicle_count maps to
+    # no hint. A camera that stops seeing vehicles also loses confidence or frames.
     "stopped_excess": ("stopped_vehicles", "high"),
     "pedestrians_excess": ("pedestrian_in_road", "high"),
 }
@@ -29,7 +30,6 @@ _FEATURE_HINTS.update(
             "p85_speed_kmh",
             "loop_speed_kmh",
             "density",
-            "vehicle_count",
             "loop_vehicle_count",
             "loop_occupancy",
             "frames",
@@ -37,6 +37,10 @@ _FEATURE_HINTS.update(
     }
 )
 MIN_SHARE = 0.1  # features contributing less than this share of the score are ignored
+# A pipeline feature only means camera_degraded when it is this far below expected (the same
+# limits as anomaly_service's system-wide health check). Frames per window wobble by a frame or
+# two, and confidence moves with the scene; neither is degradation.
+MIN_RELATIVE_DROP = {"frames": 0.15, "frames_rel": 0.15, "mean_confidence": 0.10}
 
 
 def derive_hints(
@@ -59,6 +63,8 @@ def derive_hints(
         obs, exp = observed.get(feature), expected.get(feature)
         if obs is not None and exp is not None:
             if (direction == "low" and obs >= exp) or (direction == "high" and obs <= exp):
+                continue
+            if feature in MIN_RELATIVE_DROP and obs > exp * (1 - MIN_RELATIVE_DROP[feature]):
                 continue
         weight[hint] = weight.get(hint, 0.0) + share
     if sensor_missing:

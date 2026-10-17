@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Surfaces and ink as RGB triplets so Tailwind can apply opacity (tailwind.config.js). */
+:root {
+  color-scheme: light;
+  --bg: 241 243 246;
+  --panel: 255 255 255;
+  --raised: 246 247 249;
+  --line: 222 226 232;
+  --ink: 17 20 26;
+  --muted: 82 88 99;
+  --faint: 128 135 147;
+  --accent: 42 120 214;
+  --chart-grid: #e3e6eb;
+  --chart-axis: #6b7280;
+}
+:root.dark {
+  color-scheme: dark;
+  --bg: 9 12 17;
+  --panel: 15 20 27;
+  --raised: 22 28 37;
+  --line: 35 43 55;
+  --ink: 232 236 241;
+  --muted: 160 168 181;
+  --faint: 110 119 133;
+  --accent: 57 135 229;
+  --chart-grid: #222a35;
+  --chart-axis: #8a93a3;
+}
+
+html, body, #root { height: 100%; }
+body {
+  @apply bg-bg text-ink font-sans antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Leaflet: dark tiles by filtering the standard OSM tiles; markers stay in their own colours. */
+.dark .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.6); }
+.leaflet-container { background: rgb(var(--raised)); font: inherit; }
+.dark .leaflet-control-attribution { background: rgb(15 20 27 / 0.8) !important; color: rgb(var(--muted)); }
+.dark .leaflet-control-attribution a { color: rgb(var(--muted)); }
+.dark .leaflet-bar a { background: rgb(var(--raised)); color: rgb(var(--ink)); border-color: rgb(var(--line)); }
+.leaflet-tooltip.cam-tip { background: rgb(var(--panel)); color: rgb(var(--ink)); border: 1px solid rgb(var(--line)); box-shadow: 0 4px 16px rgb(0 0 0 / 0.25); }
+.leaflet-tooltip.cam-tip::before { display: none; }
+
+/* Recharts tooltip */
+.recharts-default-tooltip { background: rgb(var(--panel)) !important; border: 1px solid rgb(var(--line)) !important; border-radius: 6px; }
+
+@layer components {
+  .panel { @apply bg-panel border border-line rounded-lg; }
+  .panel-title { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
+  .input { @apply bg-raised border border-line rounded-md px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent/50; }
+  .btn { @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium border border-line bg-raised hover:bg-line/60 disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-accent border-accent text-white hover:bg-accent/90; }
+  .link { @apply text-accent hover:underline; }
+  .th { @apply text-left text-[11px] font-semibold uppercase tracking-wider text-faint px-3 py-2 whitespace-nowrap; }
+  .td { @apply px-3 py-2 align-top; }
+}

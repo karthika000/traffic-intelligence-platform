@@ -387,3 +387,15 @@ def test_config_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (env.backend, env.threads, env.annotate, env.expected_fps) == ("auto", 4, False, 5.0)
     with pytest.raises(ValueError):
         CvConfig(backend="cuda")
+
+
+def test_frame_clock_uses_the_display_zone() -> None:
+    from zoneinfo import ZoneInfo
+
+    from cv_inference.annotate import frame_clock
+
+    assert frame_clock(datetime(2026, 10, 17, 10, 17, 44, tzinfo=UTC)) == "11:17:44 BST"
+    assert frame_clock(datetime(2026, 12, 1, 10, 17, 44)) == "10:17:44 GMT"  # naive = UTC
+    assert frame_clock(datetime(2026, 10, 17, 10, 17, 44, tzinfo=UTC), ZoneInfo("UTC")) == (
+        "10:17:44 UTC"
+    )

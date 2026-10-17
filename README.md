@@ -6,6 +6,17 @@ and serves it to a React dashboard.
 
 > **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service`, `fusion_service`, `summarizer` and `api` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
 
+## Screenshots
+
+The dashboard while a `multi_vehicle_accident` scenario runs on Hyde Park Corner at ×6 (see [Dashboard](#dashboard)). All times are in `DISPLAY_TIMEZONE` (Europe/London).
+
+| | |
+| --- | --- |
+| ![Overview during an incident](docs/screenshots/overview-during-incident.png) **Overview** during the demo incident: the run's banner, KPIs, the map with an open-incident badge, the live feed with the produced incident highlighted, and the four annotated streams. | ![Incident detail](docs/screenshots/incident-detail.png) **Incident detail:** the latest summary and its generation path, the status timeline across versions, the confidence breakdown, and the linked reports (tagged with the scenario that sent them), anomalies, metric windows and summaries. |
+| ![Camera detail](docs/screenshots/camera-detail.png) **Camera detail** on the 15-minute range: the live stream, the congestion timeline in 1-minute buckets, the metric charts and recent anomalies. | ![Demo control](docs/screenshots/demo-control.png) **Demo control:** the trigger form, the run triggered from this browser linked to the incident it produced, and recent scenario runs. |
+| ![Reports](docs/screenshots/reports.png) **Reports:** the live report feed with NLP type, severity and camera match, each with its confidence. | ![Models](docs/screenshots/models.png) **Models:** the version in service, the champion and its key MLflow metrics for each model, and a placeholder for drift status. |
+| ![Overview in light mode](docs/screenshots/overview-light.png) **Light mode.** | |
+
 ## Architecture
 
 ```
@@ -376,6 +387,11 @@ The command joins `nlp_results` with the simulator's ground truth in `simulated_
   - **While it lasts:** no new per-camera alerts start. `details.suppressed_checks` counts the checks that would otherwise have alarmed. An `update` is published when more cameras are affected.
   - **End:** after `ANOMALY_CLEAR_AFTER` (3) checks with fewer cameras affected. Per-camera alerts that started up to `ANOMALY_SYSTEM_LOOKBACK_SECONDS` (60) before it are closed at the same time, with `details.closed_by: "system_degradation"`. Alerts that started earlier carry on normally.
   - **Limit:** if throughput stays lower for good, the baseline adopts it after about 5 minutes and the episode ends.
+  - **Reading it:** a system anomaly's `score` is the number of cameras that dropped and its `threshold` is the minimum, so "3 / 3" means three cameras degraded at once, not a score on the edge of its threshold.
+- **Per-camera `camera_degraded`:** the anomaly model's `camera_degraded` hint only stands if the camera's own health check shows the same drop (frames below 0.85× or confidence below 0.9× its baseline).
+  - **Without that drop the hint is removed.** cv_inference processes about 25 frames in almost every window, so the model's normal error for `frames_rel` is tiny, and a one-frame wobble used to top the score. The hint was also derived from fewer vehicles than usual, which is quiet traffic.
+  - **Pipeline noise doesn't alert.** A check that crosses the threshold only through pipeline features (`frames_rel`, `mean_confidence`, `camera_speed_present`) on a healthy camera starts and holds no alert; the `health_noise` count in the stats line tracks these.
+  - **Models from now on:** `ml/hints.py` no longer maps `vehicle_count` to `camera_degraded`, and needs the same minimum drop. Models already registered carry their own copy of `ml/` (MLflow `code_paths`), so the service check above is what applies to them.
 - **What an alert contains:** `start`, `update` and `end` `Anomaly` messages are published to `anomalies` with the same `anomaly_id`. One row in the `anomalies` table tracks them (`severity`, `update_count`, and `details` with `fired_by`, `score_parts`, `hold`, `frozen_baseline`, `held_checks`). They carry:
   - hints (`speed_drop`, `stopped_vehicles`, `pedestrian_in_road`, `sensor_dropout`, `camera_degraded`);
   - the score, threshold and contributing features;
@@ -483,7 +499,7 @@ The summarizer writes incident summaries for operators with a local model. Nothi
 ### Facts
 
 - **Context:** a fact-only context is built from the `Incident` message and Postgres (`ml/summarize/context.py`):
-  - camera name and area, incident type, severity, status, start time (London time) and duration;
+  - camera name and area, incident type, severity, status, start time (in `DISPLAY_TIMEZONE`, with its abbreviation: "since 18:48 BST") and duration;
   - congestion level, stopped vehicles and pedestrians in the roadway;
   - **Speed:** loop-detector speed against its own pre-incident baseline (the 10 minutes before the start). Camera speed is stated only when its ratio to baseline agrees with the loops (within 25 points) or there is no loop data. The demo cameras play looped footage that never shows a simulated incident, which once produced "8 km/h against 6 km/h normally" during a standstill;
   - the number of reports and their sources, and the vehicles, lanes and places they mention;
@@ -544,12 +560,12 @@ Results on the pinned reference set (40 contexts: 20 stored incidents and 20 sce
 | Endpoint | What it returns |
 | --- | --- |
 | `GET /api/v1/cameras` | Every camera with location, current congestion level, latest metrics window, open incident count, and whether vision is degraded (with the reasons) |
-| `GET /api/v1/cameras/{id}?minutes=60&resolution=60` | Zone config, the metrics history aggregated in SQL into `resolution`-second buckets, and recent anomalies, including system-wide ones |
+| `GET /api/v1/cameras/{id}?minutes=60&resolution=60` | Zone config, the metrics history aggregated in SQL into `resolution`-second buckets (5 s to 1 h, so `resolution=60` gives 1-minute buckets), and recent anomalies, including system-wide ones |
 | `GET /api/v1/incidents?status=&camera_id=&incident_type=&severity=&since=&until=` | Incidents, newest first |
 | `GET /api/v1/incidents/{id}` | The incident with its confidence breakdown, every published version, linked evidence (anomalies, reports with their NLP results, metric windows, evidence weights) and all summaries with their generation path |
 | `GET /api/v1/reports?camera_id=&incident_type=&unlocated=&since=` | Reports with their latest NLP result. `unlocated=true` gives those matched to no camera. The default range is the last 24 h. |
 | `GET /api/v1/analytics/volume?hours=24` | Hourly vehicles (the sum of per-window unique tracks) and mean speed per camera |
-| `GET /api/v1/analytics/congestion?hours=24&bucket_minutes=60` | Congestion level counts and shares per camera and time bucket, from `congestion_history` (written by anomaly_service on every check) |
+| `GET /api/v1/analytics/congestion?hours=24&bucket_minutes=60` | Congestion level counts and shares per camera and time bucket, from `congestion_history` (written by anomaly_service on every check). Buckets go down to 1 minute; `minutes=` sets the range in minutes instead of `hours`. Over long ranges the bucket grows to keep at most 2000 per camera. |
 | `GET /api/v1/analytics/incidents?hours=168` | Incident counts by type, severity and status |
 | `GET /api/v1/models` | The version in service of every model (`model_versions`), with its MLflow champion, the champion run's metrics, and the latest run in the experiment of the same name (for example an online evaluation). MLflow is read over REST and cached for 60 s. If MLflow is unreachable, `mlflow` is null. |
 | `GET /api/v1/scenarios`, `GET /api/v1/scenarios/runs` | The simulator's scenarios (from its YAML files) and recent runs |
@@ -584,6 +600,60 @@ The codes are `not_found`, `validation_error`, `internal_error` and so on. `deta
 **Request logging:** every response carries `X-Request-ID` (yours, if you sent a well-formed one) and `Server-Timing: app;dur=<ms>`. Each request is logged as one JSON line on `api_service.access` with the request id, method, path, query, status, duration and client. `/health` and `/ready` log at DEBUG, so the healthcheck doesn't flood the log.
 
 **Docs:** OpenAPI is at `/docs` (Swagger UI) and `/openapi.json`. Endpoints are grouped by tag, with descriptions, request and response examples, and the error schema.
+
+## Dashboard
+
+`dashboard` is a React 18 + Vite + TypeScript app at <http://localhost:5173>, run by the `dashboard` container (Vite dev server, `./dashboard` bind-mounted). It talks to the API only: REST through TanStack Query, live data through one `/ws/live` connection.
+
+| Page | Shows |
+| --- | --- |
+| Overview `/` | KPI tiles (open incidents, confirmed today, cameras degraded, average speed), a Leaflet/OpenStreetMap map of the cameras coloured by congestion with an open-incident badge, the live incident feed, and the 4 annotated MJPEG streams with congestion, vehicle count and average speed overlaid |
+| Camera `/cameras/:id` | The large stream, vehicle count, average and p85 speed, density and stopped-vehicle charts over 15 min / 1 h / 6 h / 24 h, the congestion level timeline (1-minute buckets on the 15-minute range), recent anomalies (type hints, score vs threshold) and the camera's incidents |
+| Incidents `/incidents` | Filterable (status, type, severity, camera, time range), paginated table; filters live in the URL |
+| Incident `/incidents/:id` | Latest summary with its generation path, the status timeline across versions, the confidence breakdown (vision, text, agreement; a note when vision was degraded), linked reports with NLP labels, anomalies and metric windows, and every summary with the version it was written for |
+| Reports `/reports` | Live report feed with NLP type, severity, matched camera and confidences, including unlocated reports; filter by type and camera |
+| Models `/models` | One card per model: version in service, champion, key MLflow metrics and links to MLflow; a placeholder for drift status |
+| Demo control `/demo` | Trigger any scenario on any camera at a chosen time scale, see running and recent runs, and the incident each triggered run produces (also highlighted in the overview feed) |
+
+**How live data flows:**
+- **One connection.** `src/lib/liveSocket.ts` reconnects with capped exponential backoff and jitter. It drops a connection that has sent nothing (not even a heartbeat) for 45 s, and reconnects at once when the browser comes back online or the tab becomes visible.
+- **Batching.** Messages are applied to a Zustand store (`src/store/live.ts`) in 250 ms batches, one store update per batch. Every collection in the store is capped.
+- **Versions.** Incidents are keyed by id, and only a higher version replaces a row. So the feed updates rows in place and briefly highlights the one that changed.
+- **Reconnects.** After a reconnect the store is re-seeded from REST and queries are refetched, so nothing missed during the gap is lost.
+- **Streams.** MJPEG streams go to `127.0.0.1:8001` while REST uses `localhost:8001`. Browsers allow 6 connections per host, so four long-lived streams would otherwise starve REST calls. Streams pause while the tab is hidden.
+
+**Times:** every clock time is shown in `DISPLAY_TIMEZONE` (default Europe/London), not the viewer's own zone, so the dashboard matches the summaries ("since 18:48 BST") and the timestamp burned into the video frames. The header shows the current time and zone.
+
+**When the API is down:** the header shows API and WebSocket status. Views keep their last data and show an inline error with a retry. Requests time out after 10 s and nothing blocks rendering.
+
+**Linking a demo run to its incident:** an incident doesn't carry a scenario id. The dashboard therefore links a run you trigger in two steps:
+1. **Probable match:** the first incident at that camera after the trigger.
+2. **Confirmed link:** once one of the incident's evidence reports carries the run's `scenario_id`.
+
+Tracked runs are kept in the browser's localStorage and shared between the dashboard's open tabs. A link found in one tab is never overwritten by another.
+
+**Colour scales** (`src/lib/scales.ts`) are always paired with a text label:
+
+| Scale | Colours |
+| --- | --- |
+| Congestion | free flow green, moderate amber, heavy orange, standstill red |
+| Severity | low blue, medium violet, high magenta, critical red-orange, plus 1–4 pips |
+
+The severity colours never reuse a congestion colour, and they were checked for colour-vision-deficiency separation in both themes. Dark is the default theme; the header toggles light mode.
+
+```powershell
+cd dashboard
+npm run gen:types     # regenerate src/api/schema.d.ts from http://localhost:8001/openapi.json (API must be up)
+npm run typecheck     # tsc
+npm run lint          # eslint, zero warnings allowed
+npm test              # vitest + React Testing Library
+npm run check         # all three
+docker compose exec dashboard npm run check    # the same inside the container
+```
+
+The tests cover the WebSocket client (backoff, reconnect, stale detection, batching), the live store (version ordering, caps, single update per batch), the congestion and severity colour mapping, the incident feed's update logic and in-place rendering, demo-run matching, and the scenario trigger form.
+
+After changing `dashboard/package.json`, rebuild and recreate the container with fresh `node_modules`: `docker compose build dashboard; docker compose up -d --no-deps --renew-anon-volumes dashboard`.
 
 ## Event simulator
 
@@ -766,6 +836,13 @@ Run one service outside Docker: `python services\api\main.py`. Outside Docker, `
 
 All settings come from environment variables; see [.env.example](.env.example).
 `.env` is git-ignored.
+
+`DISPLAY_TIMEZONE` (an IANA zone, default `Europe/London` because the demo cameras are in London) sets the zone for clock times everywhere a person reads them:
+- **Summaries:** incident summaries name the zone, as in "since 18:48 BST".
+- **Video:** the timestamp cv_inference writes on annotated frames.
+- **Dashboard:** compose passes it to the dashboard as `VITE_DISPLAY_TIMEZONE`.
+
+Stored timestamps and the API stay in UTC. After changing it, recreate the containers with `.\scripts\up.ps1`.
 
 ### Connection settings
 

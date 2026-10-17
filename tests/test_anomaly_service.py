@@ -448,6 +448,45 @@ def test_fewer_degraded_cameras_than_the_minimum_stay_per_camera(service) -> Non
     assert starts == set(CAMERAS[:2])  # handled as ordinary per-camera alerts
 
 
+class FramesNoise:
+    """Wraps a predictor: from `after` checks on, reports what the LSTM did for a one-frame
+    wobble on a healthy camera - over threshold, led by frames_rel, hinted camera_degraded."""
+
+    def __init__(self, inner, after: int) -> None:
+        self.inner, self.after, self.calls = inner, after, 0
+
+    def predict(self, frame):
+        out = self.inner.predict(frame)
+        self.calls += 1
+        if self.calls > self.after:
+            out = out.copy()
+            out["score"], out["threshold"] = 14.85, 1.5
+            out["top_feature"], out["observed"], out["expected"] = "frames_rel", 1.0, 1.0188
+            out["hints"] = '["camera_degraded"]'
+            out["contributions"] = '{"reconstruction:frames_rel": 0.6}'
+        return out
+
+
+def test_pipeline_noise_on_a_healthy_camera_raises_nothing(service) -> None:
+    svc, sent, _ = service
+    cam = "cam-old-street"
+    svc.models.get("anomaly").predictor = FramesNoise(svc.models.get("anomaly").predictor, 30)
+    feed(svc, cam, T0, 40)  # frames steady at their baseline: the health check sees no drop
+    assert sent == []
+    assert svc.stats.health_noise >= 10
+
+
+def test_camera_degraded_needs_a_real_drop(service) -> None:
+    svc, sent, _ = service
+    cam = "cam-old-street"
+    svc.models.get("anomaly").predictor = FramesNoise(svc.models.get("anomaly").predictor, 40)
+    t = feed(svc, cam, T0, 40)  # long enough for a frames baseline
+    feed(svc, cam, t, 6, frames=8)  # a third of the usual frames: real degradation
+    [start] = [m for _, m in sent if m.event == "start"]
+    assert start.hints == ["camera_degraded"] and start.anomaly_type == "camera_degraded"
+    assert svc.cameras[cam].health.dropped == ["frames"]
+
+
 def test_anomaly_scope_validation() -> None:
     common = {
         "anomaly_type": "camera_degraded",

@@ -1,6 +1,7 @@
 """The facts a summary may use, and nothing else. ``facts_text()`` is both the model's input
 and what the faithfulness guard checks the output against."""
 
+import os
 import statistics
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -9,7 +10,18 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-TZ = ZoneInfo("Europe/London")
+# Clock times in summaries are written in this zone, with its abbreviation ("18:48 BST"), the
+# same zone the dashboard displays times in. The demo cameras are in London.
+DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE", "").strip() or "Europe/London"
+TZ = ZoneInfo(DISPLAY_TIMEZONE)
+
+
+def local_time(at: datetime, tz: ZoneInfo = TZ) -> str:
+    """ "18:48 BST": 24-hour time in the display zone with its abbreviation."""
+    t = at.astimezone(tz)
+    return f"{t:%H:%M} {t.tzname()}"
+
+
 TYPE_LABEL = {
     "accident": "accident",
     "breakdown": "broken-down vehicle",
@@ -77,7 +89,7 @@ class IncidentContext:
 
     @property
     def start_local(self) -> str:
-        return self.start_time.astimezone(TZ).strftime("%H:%M")
+        return local_time(self.start_time)
 
     @property
     def duration_min(self) -> int:

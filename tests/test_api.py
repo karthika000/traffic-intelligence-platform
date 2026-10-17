@@ -34,6 +34,7 @@ ANOMALY, SYSTEM = uuid.UUID(int=201), uuid.UUID(int=202)
 REPORTS = [uuid.UUID(int=301), uuid.UUID(int=302)]
 UNLOCATED = uuid.UUID(int=303)
 METRIC_MESSAGE = uuid.UUID(int=401)
+SCENARIO_RUN = uuid.UUID(int=501)
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9"
 
 
@@ -228,7 +229,7 @@ def seed(engine) -> None:
             "status, triggered_by, time_scale, started_at, expected_end_at) VALUES (:id, "
             "'flooding', :c, 'weather_hazard', 'critical', 'completed', 'cli', 6, :s, :e)",
             {
-                "id": uuid.uuid4(),
+                "id": SCENARIO_RUN,
                 "c": CAM,
                 "s": NOW - timedelta(hours=3),
                 "e": NOW - timedelta(hours=3) + timedelta(minutes=4),
@@ -265,6 +266,15 @@ def seed(engine) -> None:
                     "e": j([{"text": "Brook Drive", "label": "LOCATION", "start": 0, "end": 11}]),
                 },
             )
+        # The first report came from the simulator's scenario run (ground truth).
+        conn.execute(
+            text(
+                "INSERT INTO simulated_reports (id, scenario_run_id, camera_id, source, style, "
+                "text, incident_type, severity, stage, emitted_at) VALUES (:id, :run, :c, "
+                "'citizen', 'driver', 'report 0', 'accident', 'high', 'active', :at)"
+            ),
+            {"id": REPORTS[0], "run": SCENARIO_RUN, "c": CAM, "at": NOW - timedelta(minutes=4)},
+        )
         for k in range(24):  # two minutes of 5 s windows on CAM
             end = NOW - timedelta(seconds=5 * k)
             conn.execute(
@@ -410,6 +420,8 @@ def test_incident_detail(client) -> None:
     assert [a["anomaly"]["anomaly_id"] for a in ev["anomalies"]] == [str(ANOMALY)]
     assert [r["report"]["report_id"] for r in ev["reports"]] == [str(r) for r in REPORTS]
     assert ev["reports"][0]["nlp"]["incident_type"] == "accident"
+    # Scenario ids come from the simulator's ground truth, so a demo run can be traced.
+    assert [r["report"]["scenario_id"] for r in ev["reports"]] == [str(SCENARIO_RUN), None]
     assert [m["message_id"] for m in ev["metrics"]] == [str(METRIC_MESSAGE)]
     assert ev["weights"] == {f"anomaly:{ANOMALY}": None}
     [summary] = d["summaries"]
@@ -445,6 +457,19 @@ def test_analytics(client) -> None:
     counts = {k: sum(s["counts"][k] for s in shares) for k in ("heavy", "moderate", "free_flow")}
     assert counts == {"heavy": 18, "moderate": 6, "free_flow": 0}
     assert all(abs(sum(s["shares"].values()) - 1) < 1e-3 for s in shares)
+    # 1-minute buckets over a range given in minutes: two minutes of windows, 2-3 buckets.
+    fine = client.get(
+        "/api/v1/analytics/congestion", params={"minutes": 15, "bucket_minutes": 1}
+    ).json()
+    assert 2 <= len(fine) <= 3 and sum(sum(s["counts"].values()) for s in fine) == 24
+    starts = sorted(s["bucket_start"] for s in fine)
+    assert all(s.endswith(":00Z") for s in starts)  # minute boundaries
+    assert (
+        client.get("/api/v1/analytics/congestion", params={"bucket_minutes": 0}).status_code == 422
+    )
+    # Camera metrics already go down to 5 s buckets; 1-minute ones for a 15-minute range:
+    detail = client.get(f"/api/v1/cameras/{CAM}", params={"minutes": 15, "resolution": 60}).json()
+    assert detail["resolution_seconds"] == 60 and 2 <= len(detail["metrics"]) <= 3
     by = client.get("/api/v1/analytics/incidents", params={"hours": 24}).json()
     assert {(c["incident_type"], c["severity"], c["status"], c["count"]) for c in by} == {
         ("accident", "high", "confirmed", 1),

@@ -15,6 +15,8 @@ x-python-service: &python-service
     KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
     MLFLOW_TRACKING_URI: http://mlflow:5000
+    # Zone for clock times in summaries; the dashboard shows times in the same zone.
+    DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Europe/London}
   depends_on:
     kafka:
       condition: service_healthy
@@ -91,6 +93,7 @@ services:
     build: { context: ./dashboard }
     environment:
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:${API_PORT:-8001}}
+      VITE_DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Europe/London}
       VITE_USE_POLLING: "true"
     ports:
       - "${DASHBOARD_PORT:-5173}:5173"

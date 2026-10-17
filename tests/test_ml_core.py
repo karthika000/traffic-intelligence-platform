@@ -332,6 +332,28 @@ def test_hints_follow_direction_and_share() -> None:
     assert derive_hints({}, {}, {}, sensor_missing=True) == ["sensor_dropout"]
 
 
+def test_camera_degraded_hint_needs_a_material_drop() -> None:
+    contributions = {"frames_rel": 0.6, "vehicle_count_rel": 0.3}
+    # A one-frame wobble and fewer vehicles than usual: neither is a failing camera.
+    wobble = derive_hints(
+        contributions,
+        {"frames_rel": 1.0, "vehicle_count_rel": 0.4},
+        {"frames_rel": 1.0188, "vehicle_count_rel": 1.0},
+    )
+    assert wobble == []
+    dropped = derive_hints(
+        contributions,
+        {"frames_rel": 0.3, "vehicle_count_rel": 0.4},
+        {"frames_rel": 1.0, "vehicle_count_rel": 1.0},
+    )
+    assert dropped == ["camera_degraded"]
+    conf = {"mean_confidence": 0.5}
+    assert derive_hints(conf, {"mean_confidence": 0.57}, {"mean_confidence": 0.6}) == []
+    assert derive_hints(conf, {"mean_confidence": 0.2}, {"mean_confidence": 0.6}) == [
+        "camera_degraded"
+    ]
+
+
 def test_rule_based_models() -> None:
     normal = rows(30)
     incident = pd.concat(

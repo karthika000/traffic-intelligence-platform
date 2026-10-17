@@ -1,14 +1,18 @@
 """Annotated frames: boxes, track ids, speeds and the roadway polygon."""
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
 
 from cv_inference.analytics import ObjectAnalysis
 from cv_inference.zones import ResolvedZone
+
+# The frame's clock is written in the zone the dashboard and summaries use ("10:17:44 BST").
+DISPLAY_TZ = ZoneInfo(os.getenv("DISPLAY_TIMEZONE", "").strip() or "Europe/London")
 
 _COLOURS = {  # BGR
     "car": (255, 170, 0),
@@ -55,9 +59,22 @@ def annotate(
             parts.append("rider")
         _label(out, " ".join(parts), x1, y1, colour)
 
-    stamp = captured_at.strftime("%H:%M:%S")
-    _label(out, f"{header}  {stamp}", 4, 18, (40, 40, 40), scale=0.5, text_colour=(255, 255, 255))
+    _label(
+        out,
+        f"{header}  {frame_clock(captured_at)}",
+        4,
+        18,
+        (40, 40, 40),
+        scale=0.5,
+        text_colour=(255, 255, 255),
+    )
     return out
+
+
+def frame_clock(captured_at: datetime, tz: ZoneInfo = DISPLAY_TZ) -> str:
+    """ "10:17:44 BST": capture time in the display zone (naive times are UTC)."""
+    at = captured_at if captured_at.tzinfo else captured_at.replace(tzinfo=UTC)
+    return at.astimezone(tz).strftime("%H:%M:%S %Z")
 
 
 def _label(img, text, x, y, colour, scale=0.42, text_colour=(0, 0, 0)) -> None:

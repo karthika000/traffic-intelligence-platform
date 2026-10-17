@@ -12,6 +12,7 @@ from traffic_common.enums import CongestionLevel
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 MAX_HOURS = 24 * 31
+MAX_BUCKETS = 2000  # like camera metrics: the bucket grows so a response stays bounded
 
 
 @router.get("/volume", response_model=list[HourlyVolume])
@@ -37,19 +38,26 @@ async def hourly_volume(
 @router.get("/congestion", response_model=list[CongestionShare])
 async def congestion_distribution(
     hours: int = Query(24, ge=1, le=MAX_HOURS),
-    bucket_minutes: int = Query(60, ge=5, le=24 * 60),
+    minutes: int | None = Query(
+        None, ge=1, le=MAX_HOURS * 60, description="range in minutes; overrides hours"
+    ),
+    bucket_minutes: int = Query(60, ge=1, le=24 * 60),
     camera_id: str | None = None,
     conn: AsyncConnection = Depends(connection),
 ) -> list[CongestionShare]:
-    """How the congestion classifier's levels were distributed per camera and time bucket."""
+    """How the congestion classifier's levels were distributed per camera and time bucket.
+    Buckets can be as small as 1 minute; over long ranges they grow to keep at most
+    MAX_BUCKETS per camera."""
+    range_minutes = minutes if minutes is not None else hours * 60
+    bucket_minutes = max(bucket_minutes, -(-range_minutes // MAX_BUCKETS))
     rows = await conn.execute(
         text(
             "SELECT date_bin(make_interval(mins => :b), window_end, TIMESTAMPTZ '2000-01-01') "
             "AS bucket_start, camera_id, level, count(*) AS n FROM congestion_history "
-            "WHERE window_end > now() - make_interval(hours => :h) "
+            "WHERE window_end > now() - make_interval(mins => :m) "
             "AND (CAST(:c AS text) IS NULL OR camera_id = :c) GROUP BY 1, 2, 3 ORDER BY 1, 2"
         ),
-        {"h": hours, "b": bucket_minutes, "c": camera_id},
+        {"m": range_minutes, "b": bucket_minutes, "c": camera_id},
     )
     buckets: dict[tuple, dict[str, int]] = defaultdict(dict)
     for r in rows:

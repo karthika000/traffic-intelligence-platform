@@ -151,6 +151,7 @@ def report(row: Any, prefix: str = "r_") -> TextReport:
         latitude=m[f"{prefix}latitude"],
         longitude=m[f"{prefix}longitude"],
         timestamp=m[f"{prefix}reported_at"],
+        scenario_id=m.get(f"{prefix}scenario_id"),
     )
 
 
@@ -185,6 +186,7 @@ REPORT_SELECT = """
     r.id AS r_id, r.source AS r_source, r.text AS r_text, r.camera_id AS r_camera_id,
     r.location_name AS r_location_name, r.latitude AS r_latitude, r.longitude AS r_longitude,
     r.reported_at AS r_reported_at,
+    (SELECT s.scenario_run_id FROM simulated_reports s WHERE s.id = r.id) AS r_scenario_id,
     n.message_id AS n_message_id, n.report_id AS n_report_id, n.incident_type AS n_incident_type,
     n.incident_confidence AS n_incident_confidence, n.severity AS n_severity,
     n.severity_confidence AS n_severity_confidence, n.probabilities AS n_probabilities,
