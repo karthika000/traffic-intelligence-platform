@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { NLPResult } from "../api/types";
+import type { DriftAlert, NLPResult } from "../api/types";
 import { env, incident, metrics, summary } from "../test/fixtures";
 import { createLiveStore, LIMITS } from "./live";
 
@@ -13,6 +13,21 @@ const nlpResult = (n: number): NLPResult => ({
   stage: "active",
   model_name: "m",
   model_version: "1",
+});
+
+const driftAlert = (n: number, model = "vehicle-detector"): DriftAlert => ({
+  schema_version: 1,
+  message_id: `d${n}`,
+  timestamp: `2026-10-17T09:${String(n).padStart(2, "0")}:00Z`,
+  window_start: "2026-10-17T08:45:00Z",
+  window_end: "2026-10-17T09:00:00Z",
+  model_name: model,
+  model_version: "1",
+  drift_type: "data",
+  metric: "drift_share",
+  drift_score: 0.67,
+  threshold: 0.5,
+  details: { drifted_features: [{ feature: "frame_brightness", score: 2.4 }] },
 });
 
 describe("live store", () => {
@@ -94,5 +109,15 @@ describe("live store", () => {
     store.getState().noteDropped(4);
     store.getState().noteDropped(1);
     expect(store.getState().connection.dropped).toBe(5);
+  });
+
+  it("keeps drift alerts newest first, once each, capped", () => {
+    store.getState().seedDriftAlerts([driftAlert(1)]);
+    store.getState().applyBatch([env("drift.alerts", driftAlert(2, "incident-text-classifier")), env("drift.alerts", driftAlert(1))]);
+    const s = store.getState();
+    expect(s.driftAlerts.map((a) => a.message_id)).toEqual(["d2", "d1"]);
+    expect(s.ticks.drift).toBe(1);
+    store.getState().seedDriftAlerts(Array.from({ length: 60 }, (_, i) => driftAlert(i + 3)));
+    expect(store.getState().driftAlerts).toHaveLength(LIMITS.driftAlerts);
   });
 });

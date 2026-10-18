@@ -6,6 +6,7 @@ phase) are labelled is_anomaly=1 with anomaly_type "scenario:<name>"; the rest o
 (is_anomaly=-1). Everything else is assumed normal.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -14,6 +15,8 @@ from sqlalchemy import Engine, text
 
 from ml.features import METRIC_COLUMNS, attach_sensor_readings, base_features, compute_references
 from ml.labels import weak_congestion_labels
+
+log = logging.getLogger(__name__)
 
 _METRICS_SQL = f"""
 SELECT camera_id, window_end AS ts, {", ".join(METRIC_COLUMNS)}
@@ -87,6 +90,28 @@ def label_scenarios(raw: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
     return raw
 
 
+def drop_drift_mode(
+    engine: Engine, metrics: pd.DataFrame, since: datetime, until: datetime
+) -> pd.DataFrame:
+    """Remove windows recorded while the demo drift mode degraded the camera frames: they are
+    deliberately not what the cameras see, and must not become training (or reference) data."""
+    from traffic_common.driftmode import active_periods
+
+    try:
+        periods = active_periods(engine, since, until)
+    except Exception as exc:  # e.g. a database from before migration 0011
+        log.debug("no drift mode history (%s)", exc)
+        return metrics
+    if not periods or metrics.empty:
+        return metrics
+    ts = pd.to_datetime(metrics["ts"], utc=True)
+    inside = np.zeros(len(metrics), dtype=bool)
+    for start, end in periods:
+        inside |= ((ts >= pd.Timestamp(start)) & (ts < pd.Timestamp(end))).to_numpy()
+    log.info("excluded %d windows recorded in drift mode (%d periods)", inside.sum(), len(periods))
+    return metrics[~inside].reset_index(drop=True)
+
+
 def load_real(engine: Engine, hours: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Real raw rows (labelled) for the last ``hours`` (None = everything), and scenario windows."""
     until = datetime.now(UTC)
@@ -100,6 +125,7 @@ def load_real(engine: Engine, hours: float | None = None) -> tuple[pd.DataFrame,
             params={"since": since - timedelta(minutes=1), "until": until},
         )
         scenarios = pd.read_sql(text(_SCENARIOS_SQL), conn, params=params)
+    metrics = drop_drift_mode(engine, metrics, since, until)
     if metrics.empty:
         return metrics, scenario_windows(scenarios)
     raw = attach_sensor_readings(metrics, readings.drop(columns=["scenario_id"]))

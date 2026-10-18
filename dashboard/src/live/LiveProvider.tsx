@@ -2,7 +2,7 @@
 // step: after a reconnect it refetches what it may have missed.
 import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect } from "react";
-import { fetchIncident, fetchIncidents } from "../api/queries";
+import { fetchDriftAlerts, fetchIncident, fetchIncidents } from "../api/queries";
 import type { CameraStatus, Incident, Page } from "../api/types";
 import { api } from "../api/client";
 import { WS_URL } from "../lib/config";
@@ -25,6 +25,11 @@ async function seed() {
     liveStore.getState().seedMetrics(cams.items.flatMap((c) => (c.latest_metrics ? [c.latest_metrics] : [])));
   } catch {
     /* shown by the camera views */
+  }
+  try {
+    liveStore.getState().seedDriftAlerts(await fetchDriftAlerts());
+  } catch {
+    /* the header shows no alerts until the API answers */
   }
 }
 

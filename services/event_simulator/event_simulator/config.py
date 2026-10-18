@@ -19,6 +19,7 @@ class SimulatorConfig:
     dataset_dir: Path = Path("/data/nlp")
     stats_interval_seconds: float = 60.0
     max_command_age_seconds: float = 600.0  # ignore stale control messages
+    drift_mode_poll_seconds: float = 5.0  # how often drift mode (demo report style) is re-read
 
     def __post_init__(self) -> None:
         if self.report_interval_seconds <= 0 or self.sensor_interval_seconds <= 0:
@@ -37,6 +38,7 @@ class SimulatorConfig:
             "timezone": "SIMULATOR_TIMEZONE",
             "scenarios_dir": "SCENARIOS_DIR",
             "dataset_dir": "DATASET_DIR",
+            "drift_mode_poll_seconds": "DRIFT_MODE_POLL_SECONDS",
         }
         kwargs = {}
         for f in fields(cls):

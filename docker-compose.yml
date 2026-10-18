@@ -5,18 +5,20 @@ name: ${COMPOSE_PROJECT_NAME:-traffic-intel}
 #
 # .env holds host-side addresses (localhost:<port>) for local development; the
 # `environment` block below overrides them with in-network addresses.
+x-python-env: &python-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  # Zone for clock times in summaries; the dashboard shows times in the same zone.
+  DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Europe/London}
+
 x-python-service: &python-service
   env_file:
     - path: .env
       required: false
-  environment:
-    APP_ENV: ${APP_ENV:-development}
-    LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
-    MLFLOW_TRACKING_URI: http://mlflow:5000
-    # Zone for clock times in summaries; the dashboard shows times in the same zone.
-    DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Europe/London}
+  environment: *python-env
   depends_on:
     kafka:
       condition: service_healthy
@@ -82,6 +84,7 @@ services:
     volumes:
       - frames:/data/frames:ro
       - annotated:/data/annotated:ro
+      - drift_reports:/data/drift_reports:ro   # Evidently HTML reports written by ml-monitor
     healthcheck:   # /ready: Postgres and Kafka reachable, live consumer running
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"]
       interval: 15s
@@ -231,6 +234,33 @@ services:
     restart: unless-stopped
     networks: [traffic]
 
+  # Drift monitoring: Evidently checks of every champion against its reference snapshot every
+  # DRIFT_CHECK_INTERVAL_MINUTES, results to drift_reports and MLflow ("drift-monitoring"),
+  # DriftAlerts to drift.alerts. Same image as ml-trainer. On-demand checks:
+  #   docker compose exec ml-monitor python -m ml.monitoring check
+  ml-monitor:
+    <<: *python-service
+    build: { context: ., dockerfile: ml/Dockerfile }
+    command: ["python", "-m", "ml.monitoring"]
+    environment:
+      <<: *python-env
+      GIT_PYTHON_REFRESH: quiet   # MLflow probes git for run metadata; the image has none
+      OMP_NUM_THREADS: "2"        # the text embeddings; keep it off the services' cores
+      MKL_NUM_THREADS: "2"
+    volumes:
+      - ./ml:/workspace/ml:ro
+      - ./data:/workspace/data          # reference snapshots (data/ml/reference), NLP datasets
+      - drift_reports:/data/drift_reports
+      - frames:/data/frames:ro          # brightness/contrast of the frames (vehicle-detector)
+      - hf_cache:/hf_cache
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+
   # ------------------------------------------------------------------- ML training
   # Not started by `up`. Run with:
   #   docker compose run --rm ml-trainer python -m ml.training.train_congestion
@@ -241,12 +271,16 @@ services:
     environment:
       POSTGRES_URL: postgresql://${POSTGRES_USER:-traffic}:${POSTGRES_PASSWORD:-traffic}@postgres:5432/${POSTGRES_DB:-traffic}
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # vehicle-detector reference (detections topic)
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       GIT_PYTHON_REFRESH: quiet   # MLflow probes git for run metadata; the image has none
+      PROMOTION_TOLERANCE: ${PROMOTION_TOLERANCE:-0.01}
+      PROMOTION_MIN_IMPROVEMENT: ${PROMOTION_MIN_IMPROVEMENT:-0.005}
     volumes:
       - ./ml:/workspace/ml
       - ./data:/workspace/data
       - hf_cache:/hf_cache   # Hugging Face downloads (DistilBERT, NER), shared with nlp_service
+      - frames:/data/frames:ro   # vehicle-detector reference (frame brightness/contrast)
     depends_on:
       postgres:
         condition: service_healthy
@@ -281,6 +315,7 @@ networks:
 volumes:
   frames:
   annotated:
+  drift_reports:
   weights:
   hf_cache:
   kafka_data:

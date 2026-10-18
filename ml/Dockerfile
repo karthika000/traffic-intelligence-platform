@@ -12,9 +12,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY ml/requirements-runtime.txt ml/requirements-nlp.txt ml/requirements.txt /tmp/ml/
 RUN pip install -r /tmp/ml/requirements.txt && rm -rf /tmp/ml
 
+# Drift monitoring (Evidently) in its own layer, so it doesn't reinstall torch.
+COPY ml/requirements-monitoring.txt /tmp/ml/
+RUN pip install -r /tmp/ml/requirements-monitoring.txt && rm -rf /tmp/ml
+
 COPY shared/ /tmp/shared/
 RUN pip install /tmp/shared && rm -rf /tmp/shared
 
-# ml/ and data/ are bind-mounted here by the ml-trainer compose service.
+# ml/ and data/ are bind-mounted here by the ml-trainer and ml-monitor compose services.
 WORKDIR /workspace
 CMD ["python", "-m", "ml.training.train_congestion", "--help"]

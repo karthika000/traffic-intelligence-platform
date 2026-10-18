@@ -397,15 +397,24 @@ class ModelVersion(Base):
     )
     mlflow_run_id: Mapped[str | None] = mapped_column(String(64))
     metrics: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    # Evaluation-gated promotion (ml.lifecycle): decision, reasons and the champion/candidate
+    # comparison. Written by the retrain CLI; the services' upserts never touch it.
+    promotion: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
     registered_at: Mapped[datetime] = _created_at()
 
     __table_args__ = (UniqueConstraint("model_name", "version"),)
 
 
 class DriftReport(Base):
+    """Drift check results (ml.monitoring): one row per monitored feature and one overall row
+    (``feature`` NULL, ``metric`` "drift_share", ``status`` set) per check, grouped by
+    ``check_id``. The overall row's ``report`` holds the full result."""
+
     __tablename__ = "drift_reports"
 
     id: Mapped[int] = _pk()
+    check_id: Mapped[uuid.UUID | None]
+    status: Mapped[str | None] = mapped_column(String(20))  # ok | warning | drifted | no_data
     model_name: Mapped[str]
     model_version: Mapped[str] = mapped_column(String(100))
     drift_type: Mapped[DriftType] = mapped_column(_enum(DriftType, "drift_type"))
@@ -425,6 +434,81 @@ class DriftReport(Base):
         Index("ix_drift_reports_model_name_created_at", "model_name", "created_at"),
         Index("ix_drift_reports_camera_id_created_at", "camera_id", "created_at"),
         Index("ix_drift_reports_created_at", "created_at"),
+        Index("ix_drift_reports_check_id", "check_id"),
+        CheckConstraint(
+            "status IS NULL OR status IN ('ok', 'warning', 'drifted', 'no_data')",
+            name="status_valid",
+        ),
+    )
+
+
+class DriftMode(Base):
+    """The demo drift mode (one row, id 1): visual degradation in video_ingest and a new report
+    style in event_simulator. Both services poll it; ``expires_at`` switches it off by itself."""
+
+    __tablename__ = "drift_mode"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    enabled: Mapped[bool] = mapped_column(server_default=text("false"))
+    settings: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    expires_at: Mapped[datetime | None]
+    updated_by: Mapped[str | None] = mapped_column(String(50))
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+
+class DriftModeEvent(Base):
+    """Every drift mode change, so drift checks and reference windows can tell clean
+    periods from degraded ones."""
+
+    __tablename__ = "drift_mode_events"
+
+    id: Mapped[int] = _pk()
+    enabled: Mapped[bool]
+    settings: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    expires_at: Mapped[datetime | None]
+    changed_by: Mapped[str | None] = mapped_column(String(50))
+    changed_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (Index("ix_drift_mode_events_changed_at", "changed_at"),)
+
+
+class RetrainingRecommendation(Base):
+    """Retraining recommended for a model after drift alerts (automatic retraining is off by
+    default). At most one open (recommended or retraining) recommendation per model; the
+    retrain CLI resolves it, or someone dismisses it with a reason (in ``resolution``)."""
+
+    __tablename__ = "retraining_recommendations"
+
+    id: Mapped[int] = _pk()
+    model_name: Mapped[str]
+    model_version: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(20), server_default=text("'recommended'"))
+    reason: Mapped[str] = mapped_column(Text)
+    alert_count: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    drifted_features: Mapped[list[dict[str, Any]]] = mapped_column(
+        server_default=text("'[]'::jsonb")
+    )
+    first_alert_at: Mapped[datetime]
+    last_alert_at: Mapped[datetime]
+    last_alert_id: Mapped[uuid.UUID | None]
+    resolved_at: Mapped[datetime | None]
+    resolution: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('recommended', 'retraining', 'resolved', 'dismissed')",
+            name="status_valid",
+        ),
+        Index(
+            "uq_retraining_recommendations_open",
+            "model_name",
+            unique=True,
+            postgresql_where=text("status IN ('recommended', 'retraining')"),
+        ),
+        Index("ix_retraining_recommendations_created_at", "created_at"),
     )
 
 
@@ -478,6 +562,9 @@ class CongestionHistory(Base):
     window_end: Mapped[datetime]
     level: Mapped[CongestionLevel] = mapped_column(_enum(CongestionLevel, "congestion_level"))
     confidence: Mapped[float | None]
+    # The anomaly model's score and the camera's threshold at the same check (drift monitoring).
+    anomaly_score: Mapped[float | None]
+    anomaly_threshold: Mapped[float | None]
 
     __table_args__ = (
         Index("ix_congestion_history_camera_id_window_end", "camera_id", "window_end"),
@@ -539,6 +626,8 @@ class SimulatedReport(Base):
     severity: Mapped[Severity] = mapped_column(_enum(Severity, "severity"))
     location_mention: Mapped[str | None]  # exact substring of text, if any
     stage: Mapped[str] = mapped_column(String(20))  # active | cleared
+    # "slang" for reports written while drift mode was on; NULL for the standard style.
+    text_style: Mapped[str | None] = mapped_column(String(20))
     phase: Mapped[str | None] = mapped_column(String(50))
     emitted_at: Mapped[datetime]
 

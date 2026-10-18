@@ -117,6 +117,8 @@ export interface paths {
         /**
          * Congestion Distribution
          * @description How the congestion classifier's levels were distributed per camera and time bucket.
+         *     Buckets can be as small as 1 minute; over long ranges they grow to keep at most
+         *     MAX_BUCKETS per camera.
          */
         get: operations["congestion_distribution_api_v1_analytics_congestion_get"];
         put?: never;
@@ -158,6 +160,137 @@ export interface paths {
         get: operations["list_models_api_v1_models_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/drift/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Drift Status
+         * @description The latest drift check of every monitored model (status ok, warning, drifted or no_data;
+         *     "unknown" if never checked), with per-feature scores, data quality issues, the HTML report,
+         *     the open (or last) retraining recommendation and the last promotion decision.
+         */
+        get: operations["drift_status_api_v1_drift_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/drift/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Drift History
+         * @description Every check in the last ``hours`` (oldest first): drift share (the drift score charted
+         *     over time), status and drifted features.
+         */
+        get: operations["drift_history_api_v1_drift_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/drift/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Drift Alerts
+         * @description Recent DriftAlerts (newest first), as published on drift.alerts.
+         */
+        get: operations["drift_alerts_api_v1_drift_alerts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/drift/reports/{check_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Drift Report
+         * @description A check's Evidently HTML report. ml-monitor keeps the newest DRIFT_REPORTS_KEEP per model
+         *     on disk; every report is also an artifact of the check's MLflow run.
+         */
+        get: operations["drift_report_api_v1_drift_reports__check_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/drift/recommendations/{model_name}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss Recommendation
+         * @description Close a model's open "retraining recommended" record without retraining (status
+         *     "dismissed", with the reason in ``resolution``). A later drift alert opens a new one.
+         */
+        post: operations["dismiss_recommendation_api_v1_drift_recommendations__model_name__dismiss_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/drift/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Drift Mode
+         * @description Whether drift mode is on (``active``: enabled and not expired) and its settings.
+         */
+        get: operations["get_drift_mode_api_v1_drift_mode_get"];
+        put?: never;
+        /**
+         * Set Drift Mode
+         * @description Switch drift mode on (night or fog frames in video_ingest, slang reports in
+         *     event_simulator) or off. Services pick the change up within DRIFT_MODE_POLL_SECONDS.
+         *     ``duration_minutes`` switches it off by itself.
+         */
+        post: operations["set_drift_mode_api_v1_drift_mode_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -491,6 +624,273 @@ export interface components {
                 [key: string]: number;
             };
         };
+        /** DataQualityIssue */
+        DataQualityIssue: {
+            /** Kind */
+            kind: string;
+            /** Target */
+            target: string;
+            /** Value */
+            value: number;
+            /** Limit */
+            limit: number;
+            /** Message */
+            message: string;
+        };
+        /**
+         * DismissRequest
+         * @example {
+         *       "reason": "alerts came from the drift demo; the model is fine"
+         *     }
+         */
+        DismissRequest: {
+            /**
+             * Reason
+             * @description why it is dismissed
+             */
+            reason: string;
+            /**
+             * Dismissed By
+             * @default api
+             */
+            dismissed_by: string;
+        };
+        /** DriftAlert */
+        DriftAlert: {
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             */
+            schema_version: 1;
+            /**
+             * Message Id
+             * Format: uuid
+             */
+            message_id?: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /** Model Name */
+            model_name: string;
+            /** Model Version */
+            model_version: string;
+            drift_type: components["schemas"]["DriftType"];
+            /** Metric */
+            metric: string;
+            /** Feature */
+            feature?: string | null;
+            /** Drift Score */
+            drift_score: number;
+            /** Threshold */
+            threshold: number;
+            /** Camera Id */
+            camera_id?: string | null;
+            /** Details */
+            details?: {
+                [key: string]: unknown;
+            };
+        };
+        /** DriftFeature */
+        DriftFeature: {
+            /** Feature */
+            feature: string;
+            /** Kind */
+            kind: string;
+            /** Drift Type */
+            drift_type: string;
+            /** Method */
+            method: string;
+            /** Score */
+            score?: number | null;
+            /** Threshold */
+            threshold: number;
+            /** Drifted */
+            drifted: boolean;
+            /** Reference Summary */
+            reference_summary?: {
+                [key: string]: unknown;
+            };
+            /** Current Summary */
+            current_summary?: {
+                [key: string]: unknown;
+            };
+            /** Note */
+            note?: string | null;
+        };
+        /** DriftHistoryPoint */
+        DriftHistoryPoint: {
+            /**
+             * Check Id
+             * Format: uuid
+             */
+            check_id: string;
+            /** Model Name */
+            model_name: string;
+            /** Model Version */
+            model_version: string;
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /** Drift Share */
+            drift_share: number;
+            /** Status */
+            status: string;
+            /** Drifted Features */
+            drifted_features?: string[];
+        };
+        /** DriftModeInfo */
+        DriftModeInfo: {
+            /** Active */
+            active: boolean;
+            /** Enabled */
+            enabled: boolean;
+            /** Settings */
+            settings: {
+                [key: string]: unknown;
+            };
+            /** Visual Params */
+            visual_params: {
+                [key: string]: number;
+            };
+            /** Expires At */
+            expires_at?: string | null;
+            /** Updated By */
+            updated_by?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /**
+         * DriftModeRequest
+         * @example {
+         *       "duration_minutes": 60,
+         *       "enabled": true,
+         *       "preset": "night"
+         *     }
+         * @example {
+         *       "enabled": false
+         *     }
+         */
+        DriftModeRequest: {
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Preset
+             * @default night
+             * @enum {string}
+             */
+            preset: "night" | "fog" | "custom";
+            /**
+             * Visual
+             * @description degrade frames in video_ingest
+             * @default true
+             */
+            visual: boolean;
+            /**
+             * Text
+             * @description switch event_simulator to slang reports
+             * @default true
+             */
+            text: boolean;
+            /** Brightness */
+            brightness?: number | null;
+            /** Noise Std */
+            noise_std?: number | null;
+            /** Haze */
+            haze?: number | null;
+            /** Blur */
+            blur?: number | null;
+            /**
+             * Duration Minutes
+             * @description switch off automatically after this long
+             */
+            duration_minutes?: number | null;
+        };
+        /**
+         * DriftStatus
+         * @example {
+         *       "checked_at": "2026-10-17T15:00:00Z",
+         *       "drift_share": 0.67,
+         *       "drifted_features": [
+         *         "frame_brightness",
+         *         "confidence",
+         *         "objects_per_frame"
+         *       ],
+         *       "model_name": "vehicle-detector",
+         *       "model_version": "1",
+         *       "report_url": "/api/v1/drift/reports/7d7f2b1e-0d0c-4b39-9a55-1f0f2f3c9a10",
+         *       "share_threshold": 0.3,
+         *       "status": "drifted"
+         *     }
+         */
+        DriftStatus: {
+            /** Model Name */
+            model_name: string;
+            /** Model Version */
+            model_version?: string | null;
+            /** Status */
+            status: string;
+            /** Drift Share */
+            drift_share?: number | null;
+            /** Share Threshold */
+            share_threshold?: number | null;
+            /** Check Id */
+            check_id?: string | null;
+            /** Checked At */
+            checked_at?: string | null;
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
+            /** Current Rows */
+            current_rows?: number | null;
+            /** Reference Rows */
+            reference_rows?: number | null;
+            /** Features */
+            features?: components["schemas"]["DriftFeature"][];
+            /** Drifted Features */
+            drifted_features?: string[];
+            /** Quality */
+            quality?: components["schemas"]["DataQualityIssue"][];
+            /** Report Url */
+            report_url?: string | null;
+            /** Mlflow Run Id */
+            mlflow_run_id?: string | null;
+            /** Mlflow Experiment Id */
+            mlflow_experiment_id?: string | null;
+            /** Reference */
+            reference?: {
+                [key: string]: unknown;
+            };
+            /** Note */
+            note?: string | null;
+            retraining?: components["schemas"]["RetrainingRecommendation"] | null;
+            last_promotion?: components["schemas"]["PromotionDecision"] | null;
+        };
+        /**
+         * DriftType
+         * @enum {string}
+         */
+        DriftType: "data" | "prediction" | "concept";
         /** Entity */
         Entity: {
             /** Text */
@@ -855,6 +1255,29 @@ export interface components {
             /** Page Size */
             page_size: number;
         };
+        /** PromotionDecision */
+        PromotionDecision: {
+            /** Decision */
+            decision: string;
+            /** Candidate Version */
+            candidate_version?: string | null;
+            /** Champion Version */
+            champion_version?: string | null;
+            /** Reasons */
+            reasons?: string[];
+            /** Comparison */
+            comparison?: {
+                [key: string]: unknown;
+            }[];
+            /** Primary Metric */
+            primary_metric?: string | null;
+            /** Heldout */
+            heldout?: string | null;
+            /** Decided At */
+            decided_at?: string | null;
+            /** Gate Run Id */
+            gate_run_id?: string | null;
+        };
         /** ReportRecord */
         ReportRecord: {
             report: components["schemas"]["TextReport"];
@@ -867,6 +1290,37 @@ export interface components {
          * @enum {string}
          */
         ReportSource: "operator" | "citizen" | "social_media" | "news" | "police";
+        /** RetrainingRecommendation */
+        RetrainingRecommendation: {
+            /** Status */
+            status: string;
+            /** Model Version */
+            model_version: string;
+            /** Reason */
+            reason: string;
+            /** Alert Count */
+            alert_count: number;
+            /** Drifted Features */
+            drifted_features?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * First Alert At
+             * Format: date-time
+             */
+            first_alert_at: string;
+            /**
+             * Last Alert At
+             * Format: date-time
+             */
+            last_alert_at: string;
+            /** Resolved At */
+            resolved_at?: string | null;
+            /** Resolution */
+            resolution?: {
+                [key: string]: unknown;
+            };
+        };
         /**
          * ScenarioInfo
          * @example {
@@ -1518,6 +1972,8 @@ export interface operations {
         parameters: {
             query?: {
                 hours?: number;
+                /** @description range in minutes; overrides hours */
+                minutes?: number | null;
                 bucket_minutes?: number;
                 camera_id?: string | null;
             };
@@ -1631,6 +2087,351 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelInfo"][];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    drift_status_api_v1_drift_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftStatus"][];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    drift_history_api_v1_drift_history_get: {
+        parameters: {
+            query?: {
+                model_name?: string | null;
+                hours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftHistoryPoint"][];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    drift_alerts_api_v1_drift_alerts_get: {
+        parameters: {
+            query?: {
+                hours?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftAlert"][];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    drift_report_api_v1_drift_reports__check_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                check_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Evidently HTML report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": unknown;
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    dismiss_recommendation_api_v1_drift_recommendations__model_name__dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DismissRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetrainingRecommendation"];
+                };
+            };
+            /** @description no open retraining recommendation for the model */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_drift_mode_api_v1_drift_mode_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftModeInfo"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    set_drift_mode_api_v1_drift_mode_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DriftModeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftModeInfo"];
                 };
             };
             /** @description Not found */

@@ -647,7 +647,12 @@ class AnomalyService:
                 conn.execute(stmt)
                 conn.execute(
                     insert(CongestionHistory).values(
-                        camera_id=camera_id, window_end=ts, level=level, confidence=confidence
+                        camera_id=camera_id,
+                        window_end=ts,
+                        level=level,
+                        confidence=confidence,
+                        anomaly_score=score,
+                        anomaly_threshold=threshold,
                     )
                 )
         except IntegrityError:

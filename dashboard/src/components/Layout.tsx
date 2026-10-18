@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useHealth } from "../api/queries";
+import { DriftModeBadge, DriftNotifications } from "./Drift";
 import { API_BASE_URL, DISPLAY_TIMEZONE } from "../lib/config";
 import { clock, zoneName } from "../lib/format";
 import { themeStore, useTheme } from "../lib/theme";
@@ -135,9 +136,11 @@ export function Layout() {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
+            <DriftModeBadge />
             <ZoneClock />
             <ApiStatus />
             <ConnectionStatus />
+            <DriftNotifications />
             <ThemeToggle />
           </div>
         </div>

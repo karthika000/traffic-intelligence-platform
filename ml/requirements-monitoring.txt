@@ -1,0 +1,3 @@
+# Drift monitoring (ml-monitor and the ml-trainer image, tests). Pinned: the report format
+# and the metric API change between minor versions.
+evidently==0.7.23

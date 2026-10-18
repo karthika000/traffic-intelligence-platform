@@ -4,6 +4,12 @@ import type {
   CameraDetail,
   CameraStatus,
   CongestionShare,
+  DriftAlert,
+  DriftHistoryPoint,
+  DriftModeInfo,
+  DriftModeRequest,
+  DriftStatus,
+  RetrainingRecommendation,
   Incident,
   IncidentDetail,
   ModelInfo,
@@ -45,6 +51,10 @@ export const keys = {
   models: ["models"] as const,
   scenarios: ["scenarios"] as const,
   runs: ["scenario-runs"] as const,
+  driftStatus: ["drift-status"] as const,
+  driftHistory: (hours: number) => ["drift-history", hours] as const,
+  driftAlerts: ["drift-alerts"] as const,
+  driftMode: ["drift-mode"] as const,
 };
 
 export const useHealth = () =>
@@ -123,6 +133,51 @@ export const useModels = () =>
     queryFn: ({ signal }) => api<ModelInfo[]>("/api/v1/models", { signal, timeoutMs: 15_000 }),
     refetchInterval: 60_000,
   });
+
+export const useDriftStatus = () =>
+  useQuery({
+    queryKey: keys.driftStatus,
+    queryFn: ({ signal }) => api<DriftStatus[]>("/api/v1/drift/status", { signal }),
+    refetchInterval: 30_000,
+  });
+
+export const useDriftHistory = (hours: number) =>
+  useQuery({
+    queryKey: keys.driftHistory(hours),
+    queryFn: ({ signal }) => api<DriftHistoryPoint[]>("/api/v1/drift/history", { signal, query: { hours } }),
+    refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
+  });
+
+export const fetchDriftAlerts = (signal?: AbortSignal) =>
+  api<DriftAlert[]>("/api/v1/drift/alerts", { signal, query: { hours: 24, limit: 50 } });
+
+export const useDriftMode = () =>
+  useQuery({
+    queryKey: keys.driftMode,
+    queryFn: ({ signal }) => api<DriftModeInfo>("/api/v1/drift/mode", { signal }),
+    refetchInterval: 15_000,
+  });
+
+export function useSetDriftMode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: DriftModeRequest) => api<DriftModeInfo>("/api/v1/drift/mode", { method: "POST", body }),
+    onSuccess: (info) => qc.setQueryData(keys.driftMode, info),
+  });
+}
+
+export function useDismissRecommendation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ model, reason }: { model: string; reason: string }) =>
+      api<RetrainingRecommendation>(`/api/v1/drift/recommendations/${encodeURIComponent(model)}/dismiss`, {
+        method: "POST",
+        body: { reason, dismissed_by: "dashboard" },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.driftStatus }),
+  });
+}
 
 export const useScenarios = () =>
   useQuery({

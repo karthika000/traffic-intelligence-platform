@@ -92,9 +92,24 @@ def log_pyfunc(model_dir: Path, sample: list[str]) -> None:
     log.info("pyfunc check: %s", check[["incident_type", "severity"]].to_dict("records"))
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--train", type=Path, default=DATA / "reports_train.csv")
+    parser.add_argument(
+        "--extra-train",
+        type=Path,
+        default=None,
+        help="more labelled reports (same columns) added to the training split",
+    )
+    parser.add_argument(
+        "--extra-weight", type=int, default=1, help="times --extra-train is repeated"
+    )
+    parser.add_argument(
+        "--warm-start",
+        default=None,
+        help="fine-tune DistilBERT from this registered classifier (models:/... URI) instead "
+        "of the base model",
+    )
     parser.add_argument("--test", type=Path, default=DATA / "reports_test.csv")
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument("--epochs", type=int, default=3)
@@ -109,7 +124,12 @@ def main() -> None:
     parser.add_argument("--skip-entities", action="store_true", help="no NER / matching eval")
     parser.add_argument("--no-promote", action="store_true", help="don't register @champion")
     parser.add_argument("--limit", type=int, default=None, help="subsample (smoke runs)")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Train the candidates and (unless --no-promote) register the winner. Returns every
+    candidate's run and metrics, the winner and the registered version."""
     setup(args.threads)
     import mlflow
 
@@ -124,6 +144,19 @@ def main() -> None:
         random_state=args.seed,
         stratify=train_full.incident_type + "/" + train_full.severity,
     )
+    if args.extra_train is not None:
+        extra = load(args.extra_train)
+        extra_train, extra_val = train_test_split(
+            extra, test_size=args.val_fraction, random_state=args.seed
+        )
+        train = pd.concat([train, *([extra_train] * max(1, args.extra_weight))])
+        val = pd.concat([val, extra_val])
+        log.info(
+            "added %d extra reports (x%d) to train and %d to validation",
+            len(extra_train),
+            args.extra_weight,
+            len(extra_val),
+        )
     frames = {
         "train": train.reset_index(drop=True),
         "val": val.reset_index(drop=True),
@@ -146,6 +179,9 @@ def main() -> None:
                 "threads": args.threads,
                 "seed": args.seed,
                 "selection": "higher mean test macro-F1 over both tasks",
+                "extra_train": str(args.extra_train or ""),
+                "extra_weight": args.extra_weight,
+                "warm_start": args.warm_start or "",
             }
         )
         # ------------------------------------------------------------------ baseline
@@ -178,10 +214,19 @@ def main() -> None:
                 learning_rate=args.learning_rate,
                 seed=args.seed,
             )
+            init = None
+            if args.warm_start:
+                import mlflow.pyfunc
+
+                start_from = mlflow.pyfunc.load_model(args.warm_start).unwrap_python_model()
+                if start_from.kind != "transformer":
+                    raise SystemExit(f"--warm-start {args.warm_start} is not a DistilBERT model")
+                init = (start_from.model, start_from.tokenizer)
             with mlflow.start_run(run_name="distilbert", nested=True) as run:
                 mlflow.log_params(
                     {
                         "model": "distilbert-multitask",
+                        "warm_start": args.warm_start or "",
                         **{f"bert_{k}": v for k, v in vars(cfg).items()},
                     }
                 )
@@ -196,6 +241,7 @@ def main() -> None:
                     on_epoch=lambda e, h: mlflow.log_metrics(
                         {k: v for k, v in h.items() if k != "epoch"}, step=e
                     ),
+                    init=init,
                 )
                 seconds = time.perf_counter() - started
                 mlflow.log_metric("train_seconds", seconds)
@@ -260,14 +306,29 @@ def main() -> None:
                 {"candidate": winner, "parent_run": parent.info.run_id},
             )
             mlflow.set_tag("registered_version", version)
+    if version is not None:
+        from ml.monitoring.reference import save_for_run
 
-    print("\n" + table.round(4).to_string(index=False))
+        save_for_run(MODEL_NAME, version, results[winner]["run_id"])
+    return {
+        "results": results,
+        "winner": winner,
+        "table": table,
+        "parent_run_id": parent.info.run_id,
+        "registered_version": version,
+        "entity_metrics": entity_metrics,
+    }
+
+
+def main() -> None:
+    result = run(parse_args())
+    print("\n" + result["table"].round(4).to_string(index=False))
     print(
         json.dumps(
             {
-                "winner": winner,
-                "registered_version": version,
-                **{k: round(v, 4) for k, v in entity_metrics.items()},
+                "winner": result["winner"],
+                "registered_version": result["registered_version"],
+                **{k: round(v, 4) for k, v in result["entity_metrics"].items()},
             },
             indent=2,
         )

@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { useModels } from "../api/queries";
-import type { ModelInfo } from "../api/types";
-import { Empty, ErrorNote, Panel, Skeleton, Tag } from "../components/ui";
+import { useDriftHistory, useDriftStatus, useModels } from "../api/queries";
+import type { DriftHistoryPoint, DriftStatus, ModelInfo } from "../api/types";
+import { DriftModeControl, DriftPill, DriftSection } from "../components/Drift";
+import { Empty, ErrorNote, Panel, Segmented, Skeleton, Tag } from "../components/ui";
+import { MONITORED_MODELS } from "../lib/drift";
 import { dateTime } from "../lib/format";
 import { MLFLOW_URL } from "../lib/config";
 import { keyMetrics } from "../lib/models";
@@ -15,7 +17,9 @@ const modelUrl = (name: string, version?: string | null) =>
   `${MLFLOW_URL}/#/models/${encodeURIComponent(name)}${version ? `/versions/${encodeURIComponent(version)}` : ""}`;
 const runUrl = (id: string) => `${MLFLOW_URL}/#/runs/${encodeURIComponent(id)}`;
 
-function ModelCard({ m }: { m: ModelInfo }) {
+type DriftProps = { drift?: DriftStatus; history: DriftHistoryPoint[]; hours: number };
+
+function ModelCard({ m, drift, history, hours }: { m: ModelInfo } & DriftProps) {
   const [all, setAll] = useState(false);
   const ml = (m.mlflow ?? null) as Mlflow | null;
   const metrics = ml?.run?.metrics ?? {};
@@ -98,30 +102,76 @@ function ModelCard({ m }: { m: ModelInfo }) {
           )}
         </div>
       )}
-      <div className="mt-3 pt-2 border-t border-line flex items-center gap-2 text-[11px] text-faint">
-        <Tag>drift</Tag> status not available yet
-      </div>
+      {(MONITORED_MODELS as readonly string[]).includes(m.model_name) ? (
+        <DriftSection status={drift} history={history} hours={hours} />
+      ) : (
+        <div className="mt-3 pt-2 border-t border-line flex items-center gap-2 text-[11px] text-faint">
+          <Tag>drift</Tag> not monitored (no drift checks for this model)
+        </div>
+      )}
     </Panel>
   );
 }
 
+type Range = "6" | "24" | "72";
+const RANGES: { value: Range; label: string }[] = [
+  { value: "6", label: "6 h" },
+  { value: "24", label: "24 h" },
+  { value: "72", label: "3 d" },
+];
+
 export function Models() {
   const q = useModels();
+  const [range, setRange] = useState<Range>("6");
+  const hours = Number(range);
+  const drift = useDriftStatus();
+  const history = useDriftHistory(hours);
+  const byModel = new Map((drift.data ?? []).map((d) => [d.model_name, d]));
+  const historyOf = (name: string) => (history.data ?? []).filter((p) => p.model_name === name);
+  const order = (m: ModelInfo) => {
+    const i = (MONITORED_MODELS as readonly string[]).indexOf(m.model_name);
+    return i < 0 ? MONITORED_MODELS.length : i;
+  };
   return (
     <div className="flex flex-col gap-4">
+      <Panel
+        title="Drift monitoring"
+        actions={<Segmented value={range} onChange={setRange} options={RANGES} label="Drift history range" />}
+      >
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4 items-start">
+          <div className="flex flex-col gap-2 text-sm">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {(drift.data ?? []).map((d) => (
+                <span key={d.model_name} className="inline-flex items-center gap-1.5">
+                  <span className="text-muted">{d.model_name}</span>
+                  <DriftPill status={d.status} />
+                </span>
+              ))}
+            </div>
+            <p className="text-xs text-faint">
+              ml-monitor compares the last window of production data with each champion's reference snapshot (Evidently): a feature drifts when its
+              score reaches its threshold, a model is <b>drifted</b> when the share of drifted features reaches the dashed line, and a{" "}
+              <b>warning</b> when fewer features drifted or a data quality check failed. Drift alerts record a retraining recommendation;
+              retraining is gated on beating the champion.
+            </p>
+            {drift.isError && <ErrorNote error={drift.error} onRetry={() => drift.refetch()} compact />}
+          </div>
+          <div className="lg:border-l lg:border-line lg:pl-4">
+            <DriftModeControl />
+          </div>
+        </div>
+      </Panel>
       {q.isError && <ErrorNote error={q.error} onRetry={() => q.refetch()} />}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
         {q.data
-          ? q.data.map((m) => <ModelCard key={m.model_name} m={m} />)
+          ? [...q.data]
+              .sort((a, b) => order(a) - order(b))
+              .map((m) => (
+                <ModelCard key={m.model_name} m={m} drift={byModel.get(m.model_name)} history={historyOf(m.model_name)} hours={hours} />
+              ))
           : !q.isError && [0, 1, 2].map((i) => <Skeleton key={i} className="h-64" />)}
       </div>
       {q.data?.length === 0 && <Empty>No models registered.</Empty>}
-      <Panel title="Drift monitoring">
-        <div className="text-sm text-muted">
-          Drift status per model will appear here once <code className="text-xs">ml/monitoring</code> publishes to{" "}
-          <code className="text-xs">drift.alerts</code>: feature and prediction drift scores, the reference window, and the last alert.
-        </div>
-      </Panel>
       <div className="text-xs text-faint">
         Model metrics come from MLflow at <a className="link" href={MLFLOW_URL} target="_blank" rel="noreferrer">{MLFLOW_URL}</a>, cached by the API for 60 s.
       </div>

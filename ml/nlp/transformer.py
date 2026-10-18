@@ -105,11 +105,20 @@ def train(
     n_labels: dict[str, int],
     cfg: TransformerConfig,
     on_epoch: Callable[[int, dict], None] | None = None,
+    init: tuple[MultiTaskClassifier, object] | None = None,
 ) -> tuple[MultiTaskClassifier, object, list[dict]]:
-    """Fine-tune; keeps the epoch with the best validation mean macro-F1."""
+    """Fine-tune; keeps the epoch with the best validation mean macro-F1. ``init`` (a trained
+    model and its tokenizer) warm-starts from that model instead of ``cfg.base_model``."""
     _seed(cfg.seed)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.base_model)
-    model = MultiTaskClassifier(AutoModel.from_pretrained(cfg.base_model), n_labels, cfg.dropout)
+    if init is not None:
+        trained, tokenizer = init
+        model = MultiTaskClassifier(copy.deepcopy(trained.encoder), n_labels, cfg.dropout)
+        model.heads.load_state_dict(trained.heads.state_dict())
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(cfg.base_model)
+        model = MultiTaskClassifier(
+            AutoModel.from_pretrained(cfg.base_model), n_labels, cfg.dropout
+        )
     no_decay = ("bias", "LayerNorm.weight", "layer_norm.weight")
     groups = [
         {

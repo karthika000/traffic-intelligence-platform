@@ -59,6 +59,15 @@ export type ScenarioInfo = S["ScenarioInfo"];
 export type ScenarioRun = S["ScenarioRunRecord"];
 export type TriggerRequest = S["TriggerRequest"];
 export type TriggerResponse = S["TriggerResponse"];
+export type DriftAlert = Filled<S["DriftAlert"], "message_id" | "timestamp" | "details">;
+export type DriftFeature = S["DriftFeature"];
+export type DriftStatus = Filled<S["DriftStatus"], "features" | "drifted_features" | "quality">;
+export type DriftHistoryPoint = Filled<S["DriftHistoryPoint"], "drifted_features">;
+export type DriftModeInfo = S["DriftModeInfo"];
+/** Fields with server-side defaults may be left out of the request. */
+export type DriftModeRequest = Pick<S["DriftModeRequest"], "enabled"> & Partial<S["DriftModeRequest"]>;
+export type PromotionDecision = S["PromotionDecision"];
+export type RetrainingRecommendation = S["RetrainingRecommendation"];
 
 export type Page<T> = { items: T[]; total: number; page: number; page_size: number };
 
@@ -69,6 +78,7 @@ export type LiveData = {
   anomalies: Anomaly;
   "traffic.metrics": TrafficMetrics;
   "nlp.results": NLPResult;
+  "drift.alerts": DriftAlert;
 };
 export type LiveTopic = keyof LiveData;
 export type LiveEnvelope = {

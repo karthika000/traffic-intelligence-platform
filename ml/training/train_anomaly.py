@@ -99,7 +99,7 @@ def plot_scores(val_ratio: np.ndarray, test: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--real-hours", type=float, default=None, help="default: all real data")
     parser.add_argument("--no-real", action="store_true", help="train on synthetic data only")
@@ -119,7 +119,12 @@ def main() -> None:
     parser.add_argument("--latent", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-promote", action="store_true", help="don't register or set @champion")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Train, evaluate and (unless --no-promote) register the detector. Returns its run, its
+    metrics, the threshold, and the dataset (with its split column) and scenario windows."""
     setup()
     import mlflow
 
@@ -301,12 +306,31 @@ def main() -> None:
                 {"dataset_version": version.version},
             )
             mlflow.set_tag("registered_version", v)
+    registered = None
+    if not args.no_promote:
+        from ml.monitoring.reference import save_for_run
+
+        registered = v
+        save_for_run(MODEL_NAME, v, run.info.run_id)
+    return {
+        "run_id": run.info.run_id,
+        "threshold": threshold,
+        "metrics": metrics,
+        "dataset": df,
+        "windows": windows,
+        "dataset_version": version.version,
+        "registered_version": registered,
+    }
+
+
+def main() -> None:
+    result = run(parse_args())
     print(
         json.dumps(
             {
-                "threshold": threshold,
-                "dataset": version.version,
-                **{k: round(float(v), 4) for k, v in metrics.items() if pd.notna(v)},
+                "threshold": result["threshold"],
+                "dataset": result["dataset_version"],
+                **{k: round(float(v), 4) for k, v in result["metrics"].items() if pd.notna(v)},
             },
             indent=2,
         )

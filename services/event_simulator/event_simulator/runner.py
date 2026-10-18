@@ -67,6 +67,7 @@ class ScenarioRunner(threading.Thread):
         triggered_by: str = "cli",
         rng: random.Random | None = None,
         on_finish: Callable[["ScenarioRunner"], None] | None = None,
+        text_style: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__(name=f"scenario-{scenario.name}-{camera.info.id}", daemon=True)
         self.run_id = run_id
@@ -79,7 +80,7 @@ class ScenarioRunner(threading.Thread):
         self.local_tz = local_tz
         self.triggered_by = triggered_by
         self.rng = rng or random.Random()
-        self.generator = ReportGenerator(self.rng, Variant.LIVE)
+        self.generator = ReportGenerator(self.rng, Variant.LIVE, text_style)
         self.on_finish = on_finish
         self.timeline = scenario.timeline(time_scale)
         self.status = ScenarioStatus.RUNNING

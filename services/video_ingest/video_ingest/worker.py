@@ -10,6 +10,7 @@ import numpy as np
 
 from traffic_common.schemas import FrameMessage
 from video_ingest.config import IngestConfig
+from video_ingest.degrade import degrade
 from video_ingest.metrics import CameraMetrics
 from video_ingest.sampling import FrameSampler, encode_jpeg, resize_to_max_width
 from video_ingest.sources import SourceError, VideoSource, open_capture, source_fps
@@ -18,6 +19,8 @@ from video_ingest.storage import FrameStore
 log = logging.getLogger(__name__)
 
 Publish = Callable[[FrameMessage], None]
+# Drift mode's visual parameters while it is on, else None (traffic_common.driftmode).
+DriftParams = Callable[[], dict[str, float] | None]
 
 
 class CameraWorker(threading.Thread):
@@ -29,6 +32,7 @@ class CameraWorker(threading.Thread):
         store: FrameStore,
         publish: Publish,
         metrics: CameraMetrics | None = None,
+        drift: DriftParams | None = None,
     ) -> None:
         super().__init__(name=f"camera-{camera_id}", daemon=True)
         self.camera_id = camera_id
@@ -37,6 +41,8 @@ class CameraWorker(threading.Thread):
         self.store = store
         self.publish = publish
         self.metrics = metrics or CameraMetrics(camera_id)
+        self.drift = drift
+        self._rng = np.random.default_rng()
         self.sequence = 0
         # Not "_stop": that name is an internal threading.Thread method.
         self._stop_event = threading.Event()
@@ -123,6 +129,9 @@ class CameraWorker(threading.Thread):
         captured_at = datetime.now(UTC)
         try:
             frame = resize_to_max_width(frame, self.config.max_width)
+            drift = self.drift() if self.drift else None
+            if drift:
+                frame = degrade(frame, drift, self._rng)
             path = self.store.write(
                 self.camera_id, captured_at, encode_jpeg(frame, self.config.jpeg_quality)
             )

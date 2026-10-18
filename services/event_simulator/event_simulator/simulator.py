@@ -19,6 +19,7 @@ from event_simulator.reports import ReportGenerator, Variant
 from event_simulator.runner import CameraState, ScenarioRunner, sensor_payload, weather_payload
 from event_simulator.scenarios import Scenario, load_scenarios
 from traffic_common.db.models import Camera
+from traffic_common.driftmode import DriftModeWatcher
 from traffic_common.schemas import SimulatorCommand
 
 log = logging.getLogger(__name__)
@@ -58,7 +59,9 @@ class Simulator:
         self.emitter = emitter
         self.store = store
         self.rng = rng or random.Random()
-        self.generator = ReportGenerator(self.rng, Variant.LIVE)
+        # Drift mode (demo) switches every report, background and scenario, to a new style.
+        self.drift_mode = DriftModeWatcher(engine, stop, config.drift_mode_poll_seconds)
+        self.generator = ReportGenerator(self.rng, Variant.LIVE, self.text_style)
         self.tz = ZoneInfo(config.timezone)
         self.scenarios: dict[str, Scenario] = load_scenarios(config.scenarios_dir)
         self.cameras: dict[str, CameraState] = {}
@@ -66,6 +69,9 @@ class Simulator:
         self._lock = threading.Lock()
         self._stop = stop
         self._weather_seed = self.rng.random()
+
+    def text_style(self) -> str | None:
+        return self.drift_mode.state.text_style()
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -80,6 +86,9 @@ class Simulator:
         log.info("scenarios available: %s", ", ".join(sorted(self.scenarios)) or "none")
         try:
             self.refresh_cameras()
+            if self.engine is not None:
+                self.drift_mode.poll()
+                self.drift_mode.start()
             for t in threads:
                 t.start()
             while not self._stop.wait(self.config.camera_refresh_seconds):
@@ -152,6 +161,7 @@ class Simulator:
                 time_scale=time_scale, sensor_interval_seconds=self.config.sensor_interval_seconds,
                 local_tz=self.tz, triggered_by=triggered_by,
                 rng=random.Random(self.rng.random()), on_finish=self._run_finished,
+                text_style=self.text_style,
             )  # fmt: skip
             self.runs[camera_id] = runner
         runner.start()

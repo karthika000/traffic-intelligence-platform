@@ -13,11 +13,12 @@ trained on the train split is evaluated on phrasings it has not memorised.
 
 import random
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from event_simulator import slang
 from event_simulator.locations import CameraInfo, Gazetteer, gazetteer_for
 from traffic_common.enums import IncidentType, ReportSource, Severity
 
@@ -363,6 +364,7 @@ class GeneratedReport:
     stage: Stage
     core: str = ""  # un-noised building blocks, for tests and debugging
     detail: str = ""
+    text_style: str | None = None  # "slang" while drift mode is on; None = the standard style
 
     @property
     def source(self) -> ReportSource:
@@ -370,9 +372,16 @@ class GeneratedReport:
 
 
 class ReportGenerator:
-    def __init__(self, rng: random.Random | None = None, variant: Variant = Variant.LIVE) -> None:
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        variant: Variant = Variant.LIVE,
+        text_style: Callable[[], str | None] | None = None,
+    ) -> None:
         self.rng = rng or random.Random()
         self.variant = variant
+        # Asked for every report: drift mode switches the style to "slang" while it is on.
+        self.text_style = text_style
 
     # -------------------------------------------------------------- label sampling
 
@@ -407,6 +416,7 @@ class ReportGenerator:
         stage: Stage = Stage.ACTIVE,
         now: datetime | None = None,
         noise: bool = True,
+        text_style: str | None = None,
     ) -> GeneratedReport:
         rng, variant = self.rng, self.variant
         incident_type = incident_type or self.sample_incident_type()
@@ -414,8 +424,11 @@ class ReportGenerator:
             stage = Stage.ACTIVE
         severity = S.LOW if stage is Stage.CLEARED or incident_type is T.NONE else (
             severity or self.sample_severity(incident_type))  # fmt: skip
-        style = style or self.sample_style(incident_type)
         gaz = gazetteer_for(camera)
+        text_style = text_style or (self.text_style() if self.text_style else None)
+        if text_style == slang.STYLE:
+            return self._generate_slang(camera, gaz, incident_type, severity, stage)
+        style = style or self.sample_style(incident_type)
 
         if incident_type is T.NONE:
             template = CHATTER_TEMPLATES[style].pick(rng, variant)
@@ -449,6 +462,31 @@ class ReportGenerator:
         return GeneratedReport(
             text=text, incident_type=incident_type, severity=severity, style=style,
             camera_id=camera.id, location_mention=mention_out, stage=stage, core=core, detail=detail,
+        )  # fmt: skip
+
+    def _generate_slang(
+        self,
+        camera: CameraInfo,
+        gaz: Gazetteer,
+        incident_type: IncidentType,
+        severity: Severity,
+        stage: Stage,
+    ) -> GeneratedReport:
+        """Drift mode's report style: posted by drivers and on social media, in slang."""
+        rng = self.rng
+        style = rng.choice([Style.DRIVER, Style.SOCIAL_MEDIA])
+        template, core = slang.compose(rng, incident_type, severity, stage is Stage.CLEARED)
+        _, mention = self._location(gaz, style)
+        raw = template.replace("{loc}", f"{rng.choice(slang.PREPOSITIONS)} {_LOC}", 1)
+        before, _, after = raw.partition(_LOC)
+        before, after = slang.text_speak(before, rng), slang.text_speak(after, rng)
+        if rng.random() < 0.7:
+            before, after, mention = before.lower(), after.lower(), mention.lower()
+        text = re.sub(r"\s+", " ", before + mention + after).strip()
+        return GeneratedReport(
+            text=text, incident_type=incident_type, severity=severity, style=style,
+            camera_id=camera.id, location_mention=mention, stage=stage, core=core,
+            text_style=slang.STYLE,
         )  # fmt: skip
 
     def _location(self, gaz: Gazetteer, style: Style) -> tuple[str, str]:

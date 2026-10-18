@@ -2,11 +2,11 @@
 // whole batch of messages is applied in one `set`, so subscribers re-render once per batch.
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
-import type { Anomaly, Incident, LiveEnvelope, NLPResult, Summary, TrafficMetrics } from "../api/types";
+import type { Anomaly, DriftAlert, Incident, LiveEnvelope, NLPResult, Summary, TrafficMetrics } from "../api/types";
 import { capIncidents, type IncidentMap, upsertIncidents, upsertSummaries } from "../lib/incidents";
 import type { StatusInfo } from "../lib/liveSocket";
 
-export const LIMITS = { incidents: 300, anomalies: 100, nlp: 200, summaries: 300 } as const;
+export const LIMITS = { incidents: 300, anomalies: 100, nlp: 200, summaries: 300, driftAlerts: 50 } as const;
 
 export type LiveState = {
   connection: StatusInfo & { lastMessageAt?: number; connectedAt?: number; dropped: number };
@@ -15,8 +15,10 @@ export type LiveState = {
   metrics: Record<string, TrafficMetrics>;
   anomalies: Anomaly[];
   nlp: NLPResult[];
+  /** Newest first, one per alert (message id). */
+  driftAlerts: DriftAlert[];
   /** Bumped whenever a batch carried that topic: lets REST views refetch without diffing. */
-  ticks: { incidents: number; summaries: number; anomalies: number; nlp: number };
+  ticks: { incidents: number; summaries: number; anomalies: number; nlp: number; drift: number };
 };
 
 export type LiveActions = {
@@ -24,6 +26,7 @@ export type LiveActions = {
   seedIncidents: (list: Incident[]) => void;
   seedSummaries: (list: Summary[]) => void;
   seedMetrics: (list: TrafficMetrics[]) => void;
+  seedDriftAlerts: (list: DriftAlert[]) => void;
   setStatus: (info: StatusInfo) => void;
   noteMessage: () => void;
   noteDropped: (count: number) => void;
@@ -39,8 +42,15 @@ const initial = (): LiveState => ({
   metrics: {},
   anomalies: [],
   nlp: [],
-  ticks: { incidents: 0, summaries: 0, anomalies: 0, nlp: 0 },
+  driftAlerts: [],
+  ticks: { incidents: 0, summaries: 0, anomalies: 0, nlp: 0, drift: 0 },
 });
+
+function mergeDriftAlerts(list: DriftAlert[], incoming: DriftAlert[]): DriftAlert[] {
+  const byId = new Map(list.map((a) => [a.message_id, a]));
+  for (const a of incoming) byId.set(a.message_id, a);
+  return [...byId.values()].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)).slice(0, LIMITS.driftAlerts);
+}
 
 function newerMetrics(map: Record<string, TrafficMetrics>, list: TrafficMetrics[]) {
   let out = map;
@@ -73,13 +83,14 @@ export function createLiveStore() {
 
     applyBatch: (batch) =>
       set((s) => {
-        const by = { incidents: [] as Incident[], summaries: [] as Summary[], anomalies: [] as Anomaly[], metrics: [] as TrafficMetrics[], nlp: [] as NLPResult[] };
+        const by = { incidents: [] as Incident[], summaries: [] as Summary[], anomalies: [] as Anomaly[], metrics: [] as TrafficMetrics[], nlp: [] as NLPResult[], drift: [] as DriftAlert[] };
         for (const env of batch) {
           if (env.type === "incidents") by.incidents.push(env.data);
           else if (env.type === "summaries") by.summaries.push(env.data);
           else if (env.type === "anomalies") by.anomalies.push(env.data);
           else if (env.type === "traffic.metrics") by.metrics.push(env.data);
           else if (env.type === "nlp.results") by.nlp.push(env.data);
+          else if (env.type === "drift.alerts") by.drift.push(env.data);
         }
         const next: Partial<LiveState> = {};
         if (by.incidents.length) {
@@ -96,12 +107,14 @@ export function createLiveStore() {
           if (merged !== s.metrics) next.metrics = merged;
         }
         if (by.nlp.length) next.nlp = [...by.nlp.reverse(), ...s.nlp].slice(0, LIMITS.nlp);
-        if (by.incidents.length || by.summaries.length || by.anomalies.length || by.nlp.length) {
+        if (by.drift.length) next.driftAlerts = mergeDriftAlerts(s.driftAlerts, by.drift);
+        if (by.incidents.length || by.summaries.length || by.anomalies.length || by.nlp.length || by.drift.length) {
           next.ticks = {
             incidents: s.ticks.incidents + (by.incidents.length ? 1 : 0),
             summaries: s.ticks.summaries + (by.summaries.length ? 1 : 0),
             anomalies: s.ticks.anomalies + (by.anomalies.length ? 1 : 0),
             nlp: s.ticks.nlp + (by.nlp.length ? 1 : 0),
+            drift: s.ticks.drift + (by.drift.length ? 1 : 0),
           };
         }
         next.connection = { ...s.connection, lastMessageAt: Date.now() };
@@ -119,6 +132,8 @@ export function createLiveStore() {
         const merged = upsertSummaries(s.summaries, list);
         return merged === s.summaries ? s : { summaries: capSummaries(merged) };
       }),
+
+    seedDriftAlerts: (list) => set((s) => ({ driftAlerts: mergeDriftAlerts(s.driftAlerts, list) })),
 
     seedMetrics: (list) =>
       set((s) => {

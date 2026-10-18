@@ -4,7 +4,7 @@ traffic_common.schemas, so the dashboard sees the same shape over REST and the W
 these models add the API's aggregates and envelopes around them."""
 
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -226,3 +226,149 @@ class TriggerResponse(BaseModel):
     camera_id: str
     time_scale: float
     status: str = "requested"
+
+
+# --------------------------------------------------------------------------- drift monitoring
+
+
+class DriftFeature(BaseModel):
+    feature: str
+    kind: str  # num | cat | embedding
+    drift_type: str  # data | prediction
+    method: str  # wasserstein | jensenshannon | model_roc_auc
+    score: float | None = None
+    threshold: float
+    drifted: bool
+    reference_summary: dict[str, Any] = Field(default_factory=dict)
+    current_summary: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+
+
+class DataQualityIssue(BaseModel):
+    kind: str  # missing_values | out_of_range | stale_camera
+    target: str
+    value: float
+    limit: float
+    message: str
+
+
+class RetrainingRecommendation(BaseModel):
+    status: str  # recommended | retraining | resolved | dismissed
+    model_version: str
+    reason: str
+    alert_count: int
+    drifted_features: list[dict[str, Any]] = Field(default_factory=list)
+    first_alert_at: datetime
+    last_alert_at: datetime
+    resolved_at: datetime | None = None
+    resolution: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromotionDecision(BaseModel):
+    decision: str  # promoted | rejected
+    candidate_version: str | None = None
+    champion_version: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    comparison: list[dict[str, Any]] = Field(default_factory=list)
+    primary_metric: str | None = None
+    heldout: str | None = None
+    decided_at: datetime | None = None
+    gate_run_id: str | None = None
+
+
+class DriftStatus(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "model_name": "vehicle-detector",
+                    "model_version": "1",
+                    "status": "drifted",
+                    "drift_share": 0.67,
+                    "share_threshold": 0.3,
+                    "checked_at": "2026-10-17T15:00:00Z",
+                    "drifted_features": ["frame_brightness", "confidence", "objects_per_frame"],
+                    "report_url": "/api/v1/drift/reports/7d7f2b1e-0d0c-4b39-9a55-1f0f2f3c9a10",
+                }
+            ]
+        }
+    )
+
+    model_name: str
+    model_version: str | None = None
+    status: str  # ok | warning | drifted | no_data | unknown (never checked)
+    drift_share: float | None = None
+    share_threshold: float | None = None
+    check_id: UUID | None = None
+    checked_at: datetime | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    current_rows: int | None = None
+    reference_rows: int | None = None
+    features: list[DriftFeature] = Field(default_factory=list)
+    drifted_features: list[str] = Field(default_factory=list)
+    quality: list[DataQualityIssue] = Field(default_factory=list)
+    report_url: str | None = None
+    mlflow_run_id: str | None = None
+    mlflow_experiment_id: str | None = None
+    reference: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+    retraining: RetrainingRecommendation | None = None
+    last_promotion: PromotionDecision | None = None
+
+
+class DriftHistoryPoint(BaseModel):
+    check_id: UUID
+    model_name: str
+    model_version: str
+    checked_at: datetime
+    window_end: datetime
+    drift_share: float
+    status: str
+    drifted_features: list[str] = Field(default_factory=list)
+
+
+class DriftModeRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {"enabled": True, "preset": "night", "duration_minutes": 60},
+                {"enabled": False},
+            ]
+        },
+    )
+
+    enabled: bool
+    preset: Literal["night", "fog", "custom"] = "night"
+    visual: bool = Field(default=True, description="degrade frames in video_ingest")
+    text: bool = Field(default=True, description="switch event_simulator to slang reports")
+    brightness: float | None = Field(default=None, ge=0.05, le=1.0)
+    noise_std: float | None = Field(default=None, ge=0.0, le=80.0)
+    haze: float | None = Field(default=None, ge=0.0, le=0.95)
+    blur: float | None = Field(default=None, ge=0.0, le=25.0)
+    duration_minutes: float | None = Field(
+        default=None, gt=0, le=24 * 60, description="switch off automatically after this long"
+    )
+
+
+class DriftModeInfo(BaseModel):
+    active: bool  # enabled and not expired
+    enabled: bool
+    settings: dict[str, Any]
+    visual_params: dict[str, float]
+    expires_at: datetime | None = None
+    updated_by: str | None = None
+    updated_at: datetime | None = None
+
+
+class DismissRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [{"reason": "alerts came from the drift demo; the model is fine"}]
+        },
+    )
+
+    reason: str = Field(min_length=3, max_length=500, description="why it is dismissed")
+    dismissed_by: str = Field(default="api", min_length=1, max_length=50)

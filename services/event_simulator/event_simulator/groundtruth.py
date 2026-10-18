@@ -38,6 +38,7 @@ class GroundTruthStore:
                     location_mention=report.location_mention or None,
                     stage=report.stage.value,
                     phase=phase,
+                    text_style=report.text_style,
                     emitted_at=emitted_at,
                 )
             )

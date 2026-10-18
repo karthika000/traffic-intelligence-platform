@@ -15,6 +15,7 @@ from api_service.db import make_engine
 from api_service.routers import (
     analytics,
     cameras,
+    drift,
     frames,
     health,
     incidents,
@@ -26,8 +27,8 @@ from api_service.routers.models import MlflowReader
 from traffic_common.messaging import TypedProducer
 
 log = logging.getLogger(__name__)
-DESCRIPTION = """Cameras, incidents, reports, analytics, models, scenarios, frames and live updates
-for the traffic intelligence dashboard.
+DESCRIPTION = """Cameras, incidents, reports, analytics, models, drift, scenarios, frames and live
+updates for the traffic intelligence dashboard.
 
 Lists are paginated (`page`, `page_size` up to 200) and return `{items, total, page, page_size}`.
 Records use the platform's shared message schemas, the same as on Kafka and `/ws/live`.
@@ -43,6 +44,11 @@ TAGS = [
     {"name": "reports", "description": "Text reports with their NLP results."},
     {"name": "analytics", "description": "Aggregates for charts, computed in SQL."},
     {"name": "models", "description": "Models in service and their MLflow metrics."},
+    {
+        "name": "drift",
+        "description": "Drift checks per model, drift alerts, retraining recommendations, "
+        "promotion decisions and the demo drift mode.",
+    },
     {"name": "scenarios", "description": "Simulator scenarios: list, runs and triggering."},
     {"name": "frames", "description": "Annotated camera frames: latest JPEG and MJPEG stream."},
     {"name": "health", "description": "Liveness and readiness probes."},
@@ -108,7 +114,7 @@ def create_app(
         allow_headers=["*"],
         expose_headers=["X-Frame-Time", "X-Request-ID", "Server-Timing"],
     )
-    for module in (cameras, incidents, reports, analytics, models, scenarios, frames):
+    for module in (cameras, incidents, reports, analytics, models, drift, scenarios, frames):
         app.include_router(module.router, responses=observability.ERROR_RESPONSES)
     app.include_router(health.router)
     app.include_router(live.router)

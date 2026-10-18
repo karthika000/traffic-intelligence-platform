@@ -4,7 +4,7 @@ Ingests live video, synthetic/real traffic events and text reports, runs CV, NLP
 anomaly-detection models over them, fuses the signals into a single traffic picture,
 and serves it to a React dashboard.
 
-> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service`, `fusion_service`, `summarizer` and `api` are implemented, with trained congestion, anomaly and incident text models. The other app services are placeholders that start, log, and idle.
+> **Status:** the infrastructure (Kafka, PostgreSQL, MLflow), `video_ingest`, `event_simulator`, `cv_inference`, `anomaly_service`, `nlp_service`, `fusion_service`, `summarizer`, `api` and `ml-monitor` are implemented, with trained congestion, anomaly and incident text models, drift monitoring and evaluation-gated promotion (see [ML lifecycle](#ml-lifecycle)). The other app services are placeholders that start, log, and idle.
 
 ## Screenshots
 
@@ -14,8 +14,8 @@ The dashboard while a `multi_vehicle_accident` scenario runs on Hyde Park Corner
 | --- | --- |
 | ![Overview during an incident](docs/screenshots/overview-during-incident.png) **Overview** during the demo incident: the run's banner, KPIs, the map with an open-incident badge, the live feed with the produced incident highlighted, and the four annotated streams. | ![Incident detail](docs/screenshots/incident-detail.png) **Incident detail:** the latest summary and its generation path, the status timeline across versions, the confidence breakdown, and the linked reports (tagged with the scenario that sent them), anomalies, metric windows and summaries. |
 | ![Camera detail](docs/screenshots/camera-detail.png) **Camera detail** on the 15-minute range: the live stream, the congestion timeline in 1-minute buckets, the metric charts and recent anomalies. | ![Demo control](docs/screenshots/demo-control.png) **Demo control:** the trigger form, the run triggered from this browser linked to the incident it produced, and recent scenario runs. |
-| ![Reports](docs/screenshots/reports.png) **Reports:** the live report feed with NLP type, severity and camera match, each with its confidence. | ![Models](docs/screenshots/models.png) **Models:** the version in service, the champion and its key MLflow metrics for each model, and a placeholder for drift status. |
-| ![Overview in light mode](docs/screenshots/overview-light.png) **Light mode.** | |
+| ![Reports](docs/screenshots/reports.png) **Reports:** the live report feed with NLP type, severity and camera match, each with its confidence. | ![Models](docs/screenshots/models.png) **Models:** the drift mode switch and every model's drift status; per model the version in service, the champion and its key MLflow metrics, and for monitored models the drift status, drift share over time against the threshold, per-feature scores, links to the Evidently report and MLflow, the retraining recommendation and the last promotion decision. |
+| ![Drift detected](docs/screenshots/drift-detected.png) **Drift detected:** the Models page about 12 minutes into drift mode (night frames, slang reports). Three models are drifted and the text classifier, retrained on slang, only warns. The header shows the drift mode badge with its "turn off" link and the open drift alerts. | ![Overview in light mode](docs/screenshots/overview-light.png) **Light mode.** |
 
 ## Architecture
 
@@ -25,6 +25,7 @@ event_simulator ───────────────┼──► fusion
 nlp_service ───────────────────┤            │
 anomaly_service ───────────────┘            ▼
                                             api ──► dashboard
+ml-monitor ── drift checks of every champion ──► drift.alerts ──► api
 ```
 
 | Service | Responsibility |
@@ -38,6 +39,7 @@ anomaly_service ───────────────┘            ▼
 | `summarizer` | Natural-language summaries of current conditions |
 | `api` | HTTP/WebSocket API for the dashboard (host port `API_PORT`, default 8001) |
 | `dashboard` | React + Vite + TypeScript UI (port 5173) |
+| `ml-monitor` | Drift checks of every champion model against its reference, drift alerts and retraining recommendations (see [ML lifecycle](#ml-lifecycle)) |
 
 ### Infrastructure
 
@@ -49,7 +51,7 @@ anomaly_service ───────────────┘            ▼
 | `mlflow` | `ghcr.io/mlflow/mlflow:v2.17.2` + psycopg2 | Experiment tracking and model registry. Artifacts are kept in the `mlflow_artifacts` volume. |
 | `adminer` | `adminer:4.8.1` | Web SQL client for Postgres |
 
-All five have healthchecks. The 8 app services wait for `kafka` and `postgres` to report healthy before they start.
+All five have healthchecks. The 9 app services wait for `kafka` and `postgres` to report healthy before they start.
 
 Kafka has two listeners:
 
@@ -73,7 +75,7 @@ Created by `scripts/create_topics.ps1`, which `up.ps1` runs once Kafka is health
 | `nlp.results` | Incident type, severity, entities and matched camera per report (`nlp_service`) |
 | `incidents` | Fused incidents from `fusion_service` |
 | `summaries` | Text from `summarizer` |
-| `drift.alerts` | Model drift alerts from `ml/monitoring` |
+| `drift.alerts` | Model drift alerts from `ml-monitor` (`ml/monitoring`) |
 | `simulator.control` | Commands for `event_simulator` (start/stop scenarios) |
 
 There is also one dead-letter topic per consumer group, `dlq.<group>`:
@@ -92,7 +94,7 @@ For each camera it:
 
 1. **Reads** the source. `stream_url` can be a file under `/data/videos` (which maps to `./data/videos`), an `rtsp://` URL, or an `http(s)://` URL. Files play in real time and loop forever, simulating a live feed.
 2. **Samples** frames at `FRAME_SAMPLE_FPS` (default 5). Below that, vehicles move further than their own length between frames and cv_inference loses their tracks.
-3. **Resizes** frames to at most `FRAME_MAX_WIDTH`, keeping the aspect ratio, and JPEG-encodes them at `FRAME_JPEG_QUALITY`.
+3. **Resizes** frames to at most `FRAME_MAX_WIDTH`, keeping the aspect ratio, and JPEG-encodes them at `FRAME_JPEG_QUALITY`. While [drift mode](#drift-demo) is on, each frame is first darkened and noised (night) or hazed and blurred (fog).
 4. **Writes** each frame to the shared `frames` volume as `/data/frames/<camera_id>/<timestamp>.jpg`. The volume is read-write for `video_ingest` and read-only for `cv_inference` and `api`.
 5. **Publishes** a `FrameMessage` to `video.frames`, keyed by camera.
 
@@ -303,7 +305,7 @@ Two candidates run as nested runs in the MLflow experiment `incident-text-classi
 
 **Selection:** the candidate with the higher mean test macro-F1 is registered as `incident-text-classifier` `@champion`. It is an MLflow pyfunc that bundles the tokenizer, encoder, heads and label maps. Input is a `text` column. Output is `incident_type`, `severity`, their confidences, and JSON `probabilities` for both tasks.
 
-Held-out test set, current champion (version 1):
+Held-out test set, version 1 (the original champion; version 2, retrained through the promotion gate, is described under [ML lifecycle](#ml-lifecycle)):
 
 | Model | Task | Accuracy | Macro-F1 | Train time | Inference |
 | --- | --- | --- | --- | --- | --- |
@@ -553,6 +555,223 @@ Results on the pinned reference set (40 contexts: 20 stored incidents and 20 sce
 - Only configurations with a guard pass rate of at least 0.9 can be promoted. Among those, the template has the best published ROUGE-L, so it stays champion (`incident-summarizer` v3).
 - These numbers are lower than in earlier runs because the facts and references now use loop-detector speeds. Part of the template's lead comes from the references being written from the same facts. To try a model in the service anyway, set the `@champion` alias to a registered model configuration.
 
+## ML lifecycle
+
+Three pieces keep the registered models honest after they ship:
+
+- **Drift monitoring:** `ml-monitor` compares recent production data with each champion's reference snapshot.
+- **The promotion gate:** a retrained candidate replaces the champion only if it is measurably better on the same held-out data.
+- **The drift demo:** a switch that degrades the platform's inputs, so both of the above can be shown working.
+
+The code is in `ml/monitoring/` and `ml/lifecycle/`. Training and evaluation run in `ml-trainer`, as for the other models.
+
+### Reference snapshots
+
+Each registered model version has a reference: what its inputs and outputs look like on the data it was trained (or validated) on. A snapshot is stored in `data/ml/reference/<model>/v<version>/` (`reference.parquet` and `meta.json`) and logged to the version's MLflow run under `reference/`. The training CLIs and the retrain CLI save one whenever they register a version.
+
+| Model | Reference |
+| --- | --- |
+| `congestion-classifier`, `traffic-anomaly-detector` | The real rows of the training dataset (synthetic rows only if there are fewer than 2,000 real ones). Windows recorded while drift mode was on are left out of real training data altogether, with the registered model's own predictions on them: congestion level and confidence, or anomaly score ÷ camera threshold. Up to 20,000 rows. |
+| `incident-text-classifier` | 3,000 reports from `reports_train.csv`, plus any recent production reports a retrained version was also trained on (the retrain CLI keeps them in `data/nlp/retrain/`). Resampled to the incident mix of recent production reports, because the training set is deliberately flattened (16% `none`, 12% each other type). With the classifier's predictions, camera matching and text embeddings. |
+| `vehicle-detector` | It is pretrained, not trained here, so its reference is its own output on the clean camera feeds: 30 minutes of the `detections` topic read back by time, plus brightness and contrast of the current frame files. Building it fails if drift mode was on in that window. |
+
+To build them for existing champions, or rebuild one:
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.monitoring.reference build-all        # every champion without one
+docker compose run --rm ml-trainer python -m ml.monitoring.reference build vehicle-detector --minutes 30
+docker compose run --rm ml-trainer python -m ml.monitoring.reference show incident-text-classifier
+```
+
+`ml-monitor` also builds a missing reference by itself the first time it checks a new champion (`DRIFT_AUTO_REFERENCE`).
+
+### Drift checks
+
+Every check compares the last `DRIFT_WINDOW_MINUTES` (15) of production data with the champion's reference; the text check uses `DRIFT_TEXT_WINDOW_MINUTES` (30), because about 90 reports in 15 minutes give a noisy class mix. It uses [Evidently](https://www.evidentlyai.com/) 0.7.
+
+| Model | Production data | Monitored features |
+| --- | --- | --- |
+| `vehicle-detector` | `detections` read back from Kafka by time; frame files on the `frames` volume | **Data:** frame brightness, frame contrast. **Prediction:** detection confidence (per object), class mix, objects per frame, share of frames with no detections. |
+| `congestion-classifier` | `traffic_metrics` joined with loop readings (the model's raw inputs); `congestion_history` | **Data:** the 11 raw inputs (8 camera metrics, 3 loop-detector values). **Prediction:** predicted level, confidence. |
+| `traffic-anomaly-detector` | The same inputs; the anomaly score and threshold anomaly_service now stores in `congestion_history` | **Data:** the 11 inputs. **Prediction:** score ÷ threshold, share of checks at or above the threshold (the alert rate). |
+| `incident-text-classifier` | `reports` with their latest `nlp_results` (up to `DRIFT_MAX_TEXTS`) | **Data:** text length, share of unlocated reports, report embeddings. **Prediction:** predicted type, severity, both confidences. |
+
+**How a feature is scored.** Each feature gets a score and drifts when the score reaches its threshold:
+
+| Kind | Score | Default threshold |
+| --- | --- | --- |
+| Numbers | Wasserstein distance divided by the reference's standard deviation | `DRIFT_NUM_THRESHOLD` 0.1 |
+| Classifier confidences (piled up just below 1) | Jensen-Shannon distance between histograms | 0.1; 0.3 for the text classifier |
+| Categories (and yes/no shares) | Jensen-Shannon distance | `DRIFT_CAT_THRESHOLD` 0.1 |
+| Text embeddings | ROC AUC of a classifier trained to tell reference from current embeddings (0.5 means indistinguishable) | `DRIFT_EMBEDDING_THRESHOLD` 0.55 |
+
+These are effect sizes, not p-values, so a bigger window doesn't make trivial differences significant.
+
+**Low-variance features.** The Wasserstein score is measured in reference standard deviations. So when a feature's spread is very small, a shift of a percent or two scores far above the threshold. So does a current window that is merely narrower than the reference band. Examples are frames analysed per window (almost always 25), loop occupancy and loop speed.
+
+The check therefore applies one general rule. When a numeric feature's reference standard deviation is below `DRIFT_LOW_VARIANCE_CV` (0.25) of its mean, it counts as drifted only if its mean also moved by at least `DRIFT_MIN_RELATIVE_CHANGE` (5%) of the reference mean. Features held back this way keep their score, with a note such as "low-variance feature (std 7% of the mean): the mean moved 1.1%, under the 5% minimum practical change". Setting `DRIFT_LOW_VARIANCE_CV=0` turns the rule off.
+
+**Calibrated thresholds.** A few features have their own thresholds in `ml/monitoring/specs.py`. They were set by scoring quiet windows of the running platform, so normal operation sits well below them:
+
+| Feature | Threshold | Why |
+| --- | --- | --- |
+| Text class and severity mix | 0.15 | Sampling noise alone reaches about 0.1 with eight classes and a few hundred reports. |
+| Text confidences | 0.3 | Live reports already score about 0.2 against `reports_train.csv`, because the held-out phrasings get lower confidence. Unfamiliar slang scored about 0.6. |
+| `text_length` | 0.3 | Live reports, with held-out phrasings, are slightly shorter than the training split. |
+| `unlocated` | 0.15 | Live reports, with held-out location forms, are slightly more often unlocated than the training split. | Report embeddings are the mean of the DistilBERT encoder's last hidden states (hashed character n-grams with the TF-IDF baseline), reduced to 16 dimensions by a PCA fitted on the reference. A constant reference feature (say, no stopped vehicles at all) is compared as categories. Per-feature thresholds can be overridden with `DRIFT_FEATURE_THRESHOLDS` (`feature=0.2,model:feature=0.3`).
+
+**Time of day and day of week.** The traffic models are compared with reference rows from the same kind of day (weekday or weekend, in `DISPLAY_TIMEZONE`) and the same time of day, ±`DRIFT_REFERENCE_HOURS` (1). Without it, the loop detectors' daily and weekly patterns would read as drift. Fallbacks:
+
+- **Fewer than 500 such rows:** the same kind of day at any hour.
+- **None of that kind of day:** the whole reference. The check's `note` says which was used.
+
+The current training data covers only a Thursday and a Friday, so weekend checks use the whole reference, and the weekend's lighter loop-detector traffic shows up as drift in the loop features.
+
+**Data quality** is checked on every input:
+
+- **Missing values:** the missing share may exceed the reference's own by at most `DRIFT_MISSING_TOLERANCE` (0.1). Some inputs, such as speed with no tracked vehicles, are legitimately missing part of the time.
+- **Out-of-range values:** at most `DRIFT_OUT_OF_RANGE_MAX` (1%) outside the input's valid range, for example confidence outside 0–1 or speed outside 0–200 km/h.
+- **Stale cameras:** a camera with no data for `DRIFT_STALE_CAMERA_SECONDS` (120).
+
+**Verdict.** Each check ends in one of four statuses:
+
+| Status | When |
+| --- | --- |
+| `drifted` | The share of evaluated features that drifted reaches `DRIFT_SHARE_THRESHOLD` (0.5, Evidently's default dataset drift share) |
+| `warning` | Some features drifted but below that share, or a data quality check failed |
+| `ok` | No drift and no data quality issue |
+| `no_data` | Fewer than `DRIFT_MIN_ROWS` (30) current rows |
+
+**Outputs of each check:**
+
+- **Rows in `drift_reports`:** one per feature (score, threshold, method, drift type) and one overall row. The overall row has `feature` NULL, `metric` `drift_share`, the `status`, and the full result in `report`. A check's rows share a `check_id`.
+- **An Evidently HTML report:** `DRIFT_REPORTS_DIR/<model>/<check_id>.html` on the `drift_reports` volume. The newest `DRIFT_REPORTS_KEEP` (100) per model are kept; the API serves them.
+- **A run in the MLflow experiment `drift-monitoring`:** always `drift_share`, `drift_score/<feature>`, thresholds as params, `result.json`, and tags with the status. The HTML report (about 4 MB, mostly Evidently's bundled JavaScript) is logged for every `warning` or `drifted` check, but for an `ok` check only if the model's last logged report is at least `DRIFT_MLFLOW_HTML_EVERY_MINUTES` (60) old. The run's `html_report` tag says which. Every report is still kept on disk (`DRIFT_REPORTS_KEEP`).
+  - **MLflow storage per day** at the default 15-minute schedule (4 models × 96 checks): about 1.4 GB if every check logged its report. With the policy it is about 0.37 GB when all four models are ok (24 reports a day each), about 0.9 GB with two models on warning, and still 1.4 GB only if all four stay warning or drifted all day. Metrics and `result.json` add about 6 MB.
+- **A `DriftAlert` on `drift.alerts`** when the model drifted. It carries the share as `drift_score` and the threshold. `details` has the drifted features with their scores, thresholds and methods, the report URL, the MLflow run and how many checks in a row have drifted.
+
+### The ml-monitor service
+
+`ml-monitor` runs in the `ml-trainer` image and starts with the stack. It checks every model in `DRIFT_MODELS` at start and then every `DRIFT_CHECK_INTERVAL_MINUTES` (15). An overrunning check skips the slots it missed rather than running several back to back, and a failing check is logged without stopping the schedule. To run checks on demand:
+
+```powershell
+docker compose exec ml-monitor python -m ml.monitoring check                                   # all models
+docker compose exec ml-monitor python -m ml.monitoring check --model incident-text-classifier --window-minutes 30
+docker compose exec ml-monitor python -m ml.monitoring check --no-publish --no-mlflow --json   # dry run
+```
+
+The CLI prints each feature's score against its threshold, any data quality issues and the report's path. It stores results and publishes alerts exactly like the service does.
+
+**Drift alerts lead to a recommendation, not a retrain.** The service also consumes `drift.alerts` as group `ml-monitoring`. Automatic retraining is off by default (`DRIFT_AUTO_RETRAIN=false`), so an alert records **retraining recommended** in `retraining_recommendations`:
+
+- **One open recommendation per model.** It records the reason, the drifted features and an alert count; a redelivered alert is not counted twice.
+- **Resolved by the retrain CLI** with its decision.
+- **Dismissed by hand** when no retraining is needed, for example after a demo: `POST /api/v1/drift/recommendations/{model_name}/dismiss` with `{"reason": "..."}`, or **Dismiss…** on the Models page. The reason is required. The record gets status `dismissed`, with the reason and who dismissed it in `resolution`, and the next drift alert opens a new recommendation.
+
+With `DRIFT_AUTO_RETRAIN=true`, ml-monitor instead runs the retrain CLI below for the three trainable models, one at a time per model.
+
+### Evaluation-gated promotion
+
+```powershell
+docker compose run --rm ml-trainer python -m ml.lifecycle.retrain incident-text-classifier
+docker compose run --rm ml-trainer python -m ml.lifecycle.retrain congestion-classifier --tolerance 0.02
+docker compose run --rm ml-trainer python -m ml.lifecycle.retrain traffic-anomaly-detector --dry-run
+```
+
+The CLI works in four steps:
+
+1. **Train a candidate** with the model's usual training code, without promoting it.
+2. **Evaluate the candidate and the champion on the same held-out data**, each through its own registered pyfunc, so each uses its own references, normalisation and thresholds.
+3. **Decide.** The candidate is promoted only if both hold:
+   - it beats the champion on the **primary** metric by more than `--min-improvement` (`PROMOTION_MIN_IMPROVEMENT`, 0.005). The primary metrics are F1 scores between 0 and 1, so this asks for half a point. Differences smaller than that are within the noise of retraining on new data and not worth a model swap; `0` accepts any improvement;
+   - it regresses on no **guard** metric by more than `--tolerance` (`PROMOTION_TOLERANCE`, 0.01, absolute). A few guards have their own tolerance.
+4. **Record** the decision:
+   - **Registry:** the candidate is registered as a new version with alias `challenger`, and also `champion` if it was promoted. Services reload within `MODEL_REFRESH_SECONDS`.
+   - **MLflow:** the comparison and the decision go to a run `promotion-gate-<time>` in the model's experiment: every metric for both models, `delta_*`, and `promotion/decision.json`.
+   - **`model_versions.promotion`:** the decision, its reasons, the comparison, the held-out set and the gate run, on the candidate's row. A promoted candidate is `staging` until a service loads it; a rejected one is `archived`.
+   - **Recommendation:** an open retraining recommendation is resolved with the decision.
+   - **Reference:** a promoted candidate gets its drift reference.
+
+| Model | Held-out data | Primary metric | Guards |
+| --- | --- | --- | --- |
+| `congestion-classifier` | The new dataset's test split (last 15% per camera) | macro-F1 | accuracy, macro-F1 on real rows, recall of heavy and standstill (tolerance 0.02) |
+| `traffic-anomaly-detector` | Synthetic test episodes and real test windows | event F1 on synthetic episodes | recall (0.02), false alarms per hour, synthetic and real (0.25), median delay (10 s) |
+| `incident-text-classifier` | `reports_test.csv`, plus a held-out 30% of recent labelled production reports | mean macro-F1 of both tasks, averaged over the two sets | type and severity macro-F1 on `reports_test.csv`, mean macro-F1 on the recent reports |
+
+**The text candidate learns from production.** It is trained on `reports_train.csv` plus the other 70% of recent labelled production reports. These are the simulator's ground truth for the newest `--recent-hours` (2, at most `--recent-max` 2000), in standard and drift styles alike, and they are repeated `--recent-weight` (2) times. By default DistilBERT is fine-tuned from the champion for one epoch at learning rate 3e-5, about 10 minutes on CPU. Two options change that:
+
+- `--from-scratch` starts from `distilbert-base-uncased`;
+- `--candidate tfidf` trains the baseline in seconds instead.
+
+The congestion and anomaly CLIs retrain on a freshly built dataset (`--seed`). `train_nlp` gained `--extra-train`, `--extra-weight` and `--warm-start` for this.
+
+### Drift demo
+
+Drift mode degrades two of the platform's inputs until it is switched off:
+
+- **video_ingest** degrades every frame before encoding it:
+  - `night`: brightness × 0.3 plus noise (σ 22);
+  - `fog`: 65% haze towards light grey, blur and noise.
+  - The parameters can be overridden. cv_inference, the annotated streams and the dashboard all see the degraded frames.
+- **event_simulator** writes every report, background and scenario, in a new style: slang, text-speak and phrasing that appear nowhere in the training phrase pools. Examples are "PSA: a bus that's croaked @ Hide Park Corner fr fr. two lanes dead, massive wait". The style is posted by drivers and on social media. Labels stay recoverable from the text, and each report's ground truth is stored with `text_style = 'slang'`.
+
+Both services re-read the `drift_mode` table every `DRIFT_MODE_POLL_SECONDS` (5). Every change is appended to `drift_mode_events`, so the vehicle-detector reference builder can avoid degraded periods. To switch drift mode on or off:
+
+```powershell
+# API (or the switch on the dashboard's Models page; the header shows a "turn off" button while it's on)
+Invoke-RestMethod -Method Post -Uri http://localhost:8001/api/v1/drift/mode -ContentType application/json -Body '{"enabled": true, "preset": "night", "duration_minutes": 60}'
+Invoke-RestMethod -Method Post -Uri http://localhost:8001/api/v1/drift/mode -ContentType application/json -Body '{"enabled": false}'
+# CLI, from any service container
+docker compose exec api python -m traffic_common.driftmode on --preset fog --minutes 30
+docker compose exec api python -m traffic_common.driftmode off
+```
+
+`duration_minutes` switches it off by itself. `visual: false` or `text: false` degrades only one input.
+
+**A demo run:**
+
+1. Check with drift mode off. The detector and text classifier should be `ok`. The traffic models can show `warning` when the loop-detector pattern differs from the training days: their training data has only Thursday and Friday traffic.
+2. Switch drift mode on and wait for the next scheduled check, or run `check` by hand.
+   - **vehicle-detector:** frame brightness and contrast, confidence and objects per frame drift.
+   - **Traffic models:** the camera inputs drift (vehicle counts, density, confidence).
+   - **incident-text-classifier:** the embeddings, text length and confidences drift.
+   - Alerts appear in the dashboard header, and each drifted model gets "retraining recommended".
+3. Run `ml.lifecycle.retrain incident-text-classifier` and read the gate's decision.
+4. Switch drift mode off.
+
+**Results of a run on 2026-10-17 (a Saturday):** scheduled checks, drift share against the 0.5 threshold.
+
+| Model | Drift mode off (15:45 UTC) | Night + slang, 14 min in (16:00) | 29 min in (16:15) |
+| --- | --- | --- | --- |
+| vehicle-detector | **ok** 0.00 | **drifted** 0.83: brightness 4.76, contrast 4.96, objects per frame 1.10, no detections 0.21, class mix 0.15 | **drifted** 1.00 |
+| congestion-classifier | **warning** 0.38: the 3 loop inputs (weekend), `frames` 0.57, predicted level 0.32 | **drifted** 1.00: vehicle count 1.05, average speed 0.89, density 0.77, confidence 0.35, ... | **drifted** 1.00, plus missing speeds 12% (reference 1%) |
+| traffic-anomaly-detector | **warning** 0.38: the 3 loop inputs, score ratio 0.26, alert rate 0.21 | **drifted** 0.92 | **drifted** 0.92 |
+| incident-text-classifier | **ok** 0.00 | **warning** 0.29: embedding AUC 0.65, confidence 0.34 (window half slang) | **drifted** 0.57: embedding AUC 0.79, confidence 0.53, text length 0.53, class mix 0.28 |
+
+Each drifted check published a `DriftAlert` and recorded "retraining recommended". The text classifier's retrain then took about 14 minutes. It used 532 labelled reports from the last two hours (181 in slang): 372 for training and 160 held out (53 slang). The gate **promoted** the candidate (v2):
+
+| Metric | Champion v1 | Candidate v2 |
+| --- | --- | --- |
+| Primary: mean macro-F1, averaged over both held-out sets | 0.888 | **0.964** |
+| `reports_test.csv` incident type macro-F1 | 0.956 | 0.982 |
+| `reports_test.csv` severity macro-F1 | 0.888 | 0.943 |
+| Recent production reports, mean macro-F1 | 0.854 | 0.964 |
+
+**Caveat on those test scores.** The gain on `reports_test.csv` is partly exposure, not only generalisation. Live reports use the same held-out phrase pools as the test split, so a model trained on production reports has seen those phrasings, even though no test text appeared verbatim. For v2, `reports_test.csv` is therefore no longer a clean unseen-phrasing benchmark.
+
+**Traffic models retrained on 2026-10-18.** Both had warned all weekend on the loop-detector inputs, because their training data had only Thursday and Friday. Both were retrained through the gate on all real data up to Sunday 09:16 UTC, leaving out 2,796 drift-mode windows, and both were promoted:
+
+| Model | Metric | Champion | Candidate |
+| --- | --- | --- | --- |
+| congestion-classifier (v1 → v2) | Primary: macro-F1 | 0.9933 | 0.9938 |
+| | Macro-F1 on real rows (mostly weekend) | 0.802 | **0.964** |
+| traffic-anomaly-detector (v3 → v4) | Primary: event F1, synthetic episodes | 0.667 | 0.690 |
+| | False alarms per hour, real | 6.94 | **1.42** |
+
+The congestion classifier's primary margin is tiny, because both models score about 0.99 on the shared synthetic test episodes. It was promoted while `PROMOTION_MIN_IMPROVEMENT` defaulted to 0; with today's default of 0.005 that candidate would have been rejected, despite its gain on real rows. A gain on real data only is better made primary than slipped through a zero margin. Both retraining recommendations were resolved as promoted.
+
+The first check after the retrains still warned on both models, on loop occupancy and loop speed (drift share 0.23). Once the low-variance rule was added, the next check held back `frames` and `loop_speed_kmh`, whose means had moved 0.8–3.5%. Both models were left warning on a single feature, `loop_occupancy` (drift share 0.08). Its mean is about 8% above the reference's: Sunday midday against the only weekend data at that hour, Saturday's. That is a real, if small, difference, so it stays flagged. The two stale recommendations, from the drift demo, were dismissed.
+
 ## API
 
 `api` is a FastAPI service on port `API_PORT` (8001). It uses async SQLAlchemy with psycopg 3 against Postgres. Interactive documentation is at <http://localhost:8001/docs>. Records the platform already has a message schema for (incidents, summaries, anomalies, NLP results, reports, metrics) are returned in those shared schemas (`traffic_common.schemas`), so REST and the WebSocket use the same shapes. Lists are paginated with `?page=` and `?page_size=` (at most 200) and return `{items, total, page, page_size}`.
@@ -568,6 +787,12 @@ Results on the pinned reference set (40 contexts: 20 stored incidents and 20 sce
 | `GET /api/v1/analytics/congestion?hours=24&bucket_minutes=60` | Congestion level counts and shares per camera and time bucket, from `congestion_history` (written by anomaly_service on every check). Buckets go down to 1 minute; `minutes=` sets the range in minutes instead of `hours`. Over long ranges the bucket grows to keep at most 2000 per camera. |
 | `GET /api/v1/analytics/incidents?hours=168` | Incident counts by type, severity and status |
 | `GET /api/v1/models` | The version in service of every model (`model_versions`), with its MLflow champion, the champion run's metrics, and the latest run in the experiment of the same name (for example an online evaluation). MLflow is read over REST and cached for 60 s. If MLflow is unreachable, `mlflow` is null. |
+| `GET /api/v1/drift/status` | The latest drift check of every monitored model: status (`ok`, `warning`, `drifted`, `no_data`, or `unknown` if never checked), drift share, per-feature scores and thresholds, data quality issues, report URL and MLflow run, the open (or last) retraining recommendation and the last promotion decision |
+| `GET /api/v1/drift/history?hours=24&model_name=` | Every check in the range, oldest first: drift share, status and drifted features |
+| `GET /api/v1/drift/alerts?hours=24&limit=50` | Recent `DriftAlert`s, newest first, in the `drift.alerts` schema |
+| `GET /api/v1/drift/reports/{check_id}` | A check's Evidently HTML report (404 once ml-monitor has pruned it; it stays in MLflow) |
+| `POST /api/v1/drift/recommendations/{model_name}/dismiss` `{"reason": "..."}` | Dismisses the model's open "retraining recommended" record (status `dismissed`, with the reason); 404 if none is open |
+| `GET /api/v1/drift/mode`, `POST /api/v1/drift/mode` `{"enabled": true, "preset": "night", "duration_minutes": 60}` | Drift mode's state, and switching it on or off (see [Drift demo](#drift-demo)) |
 | `GET /api/v1/scenarios`, `GET /api/v1/scenarios/runs` | The simulator's scenarios (from its YAML files) and recent runs |
 | `POST /api/v1/scenarios/{name}/trigger` `{"camera_id": "...", "time_scale": 6}` | Validates the scenario and camera, publishes a `SimulatorCommand` to `simulator.control`, and returns `202` with the `scenario_id` |
 | `GET /api/v1/frames/{camera}/latest.jpg` | The latest annotated frame, sent with no-cache headers and `X-Frame-Time` |
@@ -575,7 +800,7 @@ Results on the pinned reference set (40 contexts: 20 stored incidents and 20 sce
 
 **Live updates: `ws://localhost:8001/ws/live`.**
 
-- **Consumer:** a background Kafka consumer runs with a group unique to the API process, starting at the latest offsets. It reads `incidents`, `summaries`, `anomalies`, `traffic.metrics` and `nlp.results`.
+- **Consumer:** a background Kafka consumer runs with a group unique to the API process, starting at the latest offsets. It reads `incidents`, `summaries`, `anomalies`, `traffic.metrics`, `nlp.results` and `drift.alerts`.
 - **Envelopes:** each message is sent as `{"type": "<topic>", "camera_ids": [...], "ts": ..., "data": {...}}`, where `data` is the shared schema.
 - **Subscribing:** connect with `?topics=incidents,summaries&cameras=cam-old-street`, or send `{"action": "subscribe", "topics": [...], "cameras": [...]}` later. Messages without a camera, such as unlocated reports, go to camera-filtered clients too.
 - **Rate limits and heartbeats:** `traffic.metrics` is throttled per camera (`API_WS_METRICS_INTERVAL_SECONDS`, 2). Idle connections get `heartbeat` messages (`API_WS_HEARTBEAT_SECONDS`, 15).
@@ -612,7 +837,7 @@ The codes are `not_found`, `validation_error`, `internal_error` and so on. `deta
 | Incidents `/incidents` | Filterable (status, type, severity, camera, time range), paginated table; filters live in the URL |
 | Incident `/incidents/:id` | Latest summary with its generation path, the status timeline across versions, the confidence breakdown (vision, text, agreement; a note when vision was degraded), linked reports with NLP labels, anomalies and metric windows, and every summary with the version it was written for |
 | Reports `/reports` | Live report feed with NLP type, severity, matched camera and confidences, including unlocated reports; filter by type and camera |
-| Models `/models` | One card per model: version in service, champion, key MLflow metrics and links to MLflow; a placeholder for drift status |
+| Models `/models` | Drift mode switch and every model's drift status; then one card per model: version in service, champion, key MLflow metrics and links to MLflow, and for monitored models their drift status (OK, warning, drifted), a chart of drift share over time against the threshold, per-feature scores with drifted features first, data quality issues, links to the latest Evidently report and its MLflow run, the retraining recommendation and the last promotion decision with its reasons |
 | Demo control `/demo` | Trigger any scenario on any camera at a chosen time scale, see running and recent runs, and the incident each triggered run produces (also highlighted in the overview feed) |
 
 **How live data flows:**
@@ -621,6 +846,8 @@ The codes are `not_found`, `validation_error`, `internal_error` and so on. `deta
 - **Versions.** Incidents are keyed by id, and only a higher version replaces a row. So the feed updates rows in place and briefly highlights the one that changed.
 - **Reconnects.** After a reconnect the store is re-seeded from REST and queries are refetched, so nothing missed during the gap is lost.
 - **Streams.** MJPEG streams go to `127.0.0.1:8001` while REST uses `localhost:8001`. Browsers allow 6 connections per host, so four long-lived streams would otherwise starve REST calls. Streams pause while the tab is hidden.
+
+**Header notifications:** a bell lists the drift alerts of the last 24 hours (seeded from REST, then live), with a count of unseen ones and links to their reports. While drift mode is on, the header shows a badge with a "turn off" button.
 
 **Times:** every clock time is shown in `DISPLAY_TIMEZONE` (default Europe/London), not the viewer's own zone, so the dashboard matches the summaries ("since 18:48 BST") and the timestamp burned into the video frames. The header shows the current time and zone.
 
@@ -651,7 +878,7 @@ npm run check         # all three
 docker compose exec dashboard npm run check    # the same inside the container
 ```
 
-The tests cover the WebSocket client (backoff, reconnect, stale detection, batching), the live store (version ordering, caps, single update per batch), the congestion and severity colour mapping, the incident feed's update logic and in-place rendering, demo-run matching, and the scenario trigger form.
+The tests cover the WebSocket client (backoff, reconnect, stale detection, batching), the live store (version ordering, caps, single update per batch), the congestion and severity colour mapping, the incident feed's update logic and in-place rendering, demo-run matching, the scenario trigger form, and the drift helpers (status mapping, feature ordering, alert summaries).
 
 After changing `dashboard/package.json`, rebuild and recreate the container with fresh `node_modules`: `docker compose build dashboard; docker compose up -d --no-deps --renew-anon-volumes dashboard`.
 
@@ -671,6 +898,7 @@ How the inputs are generated:
 - **Location mentions** vary: official names, nearby streets, landmarks, abbreviations, misspellings, and "street near landmark" combinations. Operators and police never misspell.
 - **Weather** changes condition rarely and moves gradually.
 - **Traffic** follows a daily pattern with weekday peaks around 08:00 and 17:30, flatter at weekends. Speed falls as flow rises.
+- **Drift mode:** while [drift mode](#drift-demo) is on, every report is written in a slang style the text models never saw (`text_style = 'slang'` in the ground truth).
 
 ### Scenarios
 
@@ -723,7 +951,8 @@ Options: `--train N`, `--test N`, `--train-seed`, `--test-seed`, `--out DIR`.
 services/<name>/     main.py, Dockerfile, requirements.txt per service
 shared/              traffic-common package: settings, Kafka schemas + clients, DB models + migrations
 dashboard/           React + Vite + TypeScript frontend
-ml/                  features, labels, datasets, models, training CLIs, evaluation (+ ml-trainer image)
+ml/                  features, labels, datasets, models, training CLIs, evaluation, monitoring (drift),
+                     lifecycle (promotion gate) (+ ml-trainer / ml-monitor image)
 data/                local datasets and sample videos (git-ignored)
 models/              trained model artifacts (git-ignored, mounted read-only)
 tests/               repository-level tests (+ Dockerfile for the in-Docker test runner)
@@ -817,6 +1046,10 @@ ruff check .
 | `test_ml_models.py` | torch (Docker) | The autoencoder and both congestion models round-trip through MLflow pyfunc packaging and score raw rows |
 | `test_anomaly_service.py` | Postgres | Model reload when the champion alias moves, rule fallback, keeping the current model when the registry is down, the sensor join, start and end events, cooldown, stale metrics, sensor storage |
 | `test_anomaly_integration.py` | Kafka + Postgres | A synthetic incident published to `traffic.metrics` produces an `Anomaly` on `anomalies` and a row in `anomalies` |
+| `test_drift_monitoring.py` | Evidently | Drift scores on synthetic shifted and unshifted data (numbers, categories, embeddings), threshold overrides, the ok / warning / drifted / no_data verdict and HTML report, data quality (missing, out of range, stale cameras), time-of-day reference slicing, settings, and the scheduler (interval, skipped slots, failures, on-demand runs) |
+| `test_ml_lifecycle.py` | Postgres | The promotion gate (candidate better, worse, better on the primary metric but regressing on a guard, tolerances, lower-is-better guards, no champion), the per-model policies, retraining recommendations from drift alerts (counted once, resolved by a decision) and promotion decisions in `model_versions` |
+| `test_drift_mode.py` | Postgres | Drift mode settings and presets, switching it on and off (expiry, history, active periods), the services' watcher, video_ingest's night and fog degradation and its worker toggling, and event_simulator switching to (and back from) the slang style |
+| `test_api_drift.py` | Postgres | The drift endpoints: status per model with features, quality, recommendation and promotion; history; alerts; HTML reports; switching drift mode on and off; validation |
 | `test_event_simulator_integration.py` | Kafka + Postgres | A scenario triggered through `simulator.control` emits tagged messages on `reports.text` and `events.raw`, and its ground truth lands in `scenario_runs` and `simulated_reports` |
 
 Tests whose infrastructure isn't reachable are skipped, with the reason shown by `-rs`. The infrastructure tests work in throwaway topics, consumer groups and databases, which they delete afterwards. They never touch the `traffic` database. Four integration tests do publish to real topics:

@@ -140,7 +140,7 @@ def log_candidate(
         return run.info.run_id, metrics
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--real-hours", type=float, default=None, help="default: all real data")
     parser.add_argument("--no-real", action="store_true", help="train on synthetic data only")
@@ -149,7 +149,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mlp-epochs", type=int, default=40)
     parser.add_argument("--no-promote", action="store_true", help="don't register or set @champion")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Train both candidates and (unless --no-promote) register the winner. Returns the
+    winner, its run and metrics, and the dataset with its split column."""
     setup()
     import mlflow
 
@@ -266,9 +271,33 @@ def main() -> None:
                 {"model": winner, "dataset_version": version.version},
             )
             mlflow.set_tag("registered_version", v)
+    registered = None
+    if not args.no_promote:
+        from ml.monitoring.reference import save_for_run
+
+        registered = v
+        save_for_run(MODEL_NAME, v, candidates[winner][0])
+    return {
+        "winner": winner,
+        "run_id": candidates[winner][0],
+        "metrics": candidates[winner][1],
+        "comparison": comparison,
+        "dataset": df,
+        "dataset_version": version.version,
+        "registered_version": registered,
+    }
+
+
+def main() -> None:
+    result = run(parse_args())
     print(
         json.dumps(
-            {"winner": winner, "comparison": comparison, "dataset": version.version}, indent=2
+            {
+                "winner": result["winner"],
+                "comparison": result["comparison"],
+                "dataset": result["dataset_version"],
+            },
+            indent=2,
         )
     )
 

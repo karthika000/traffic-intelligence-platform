@@ -1,8 +1,9 @@
 """Live updates over a WebSocket.
 
-A background thread consumes incidents, summaries, anomalies, traffic.metrics and nlp.results
-with a consumer group unique to this API process, starting at the latest offsets (clients get
-what happens from now on; history is in the REST API). Each message becomes one JSON envelope
+A background thread consumes incidents, summaries, anomalies, traffic.metrics, nlp.results and
+drift.alerts with a consumer group unique to this API process, starting at the latest offsets
+(clients get what happens from now on; history is in the REST API). Each message becomes one
+JSON envelope
 
     {"type": "<topic>", "camera_ids": [...], "ts": "...", "data": {...shared schema...}}
 
@@ -37,6 +38,7 @@ LIVE_TOPICS = (
     Topic.ANOMALIES,
     Topic.TRAFFIC_METRICS,
     Topic.NLP_RESULTS,
+    Topic.DRIFT_ALERTS,
 )
 router = APIRouter(tags=["live"])
 

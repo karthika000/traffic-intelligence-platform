@@ -8,6 +8,7 @@ from datetime import timedelta
 from sqlalchemy import Engine, select
 
 from traffic_common.db.models import Camera
+from traffic_common.driftmode import DriftModeWatcher
 from video_ingest.config import IngestConfig
 from video_ingest.sources import resolve_source
 from video_ingest.storage import FrameStore, cleanup_expired_frames
@@ -45,6 +46,12 @@ class Supervisor:
         self._stop = stop
         self.workers: dict[str, CameraWorker] = {}
         self._urls: dict[str, str] = {}
+        self.drift_mode = DriftModeWatcher(engine, stop, config.drift_mode_poll_seconds)
+
+    def drift_params(self) -> dict[str, float] | None:
+        """Visual degradation while drift mode is on (and not expired), else None."""
+        state = self.drift_mode.state
+        return state.settings.visual_params() if state.visual_active() else None
 
     def run(self) -> None:
         """Block until ``stop`` is set."""
@@ -54,6 +61,8 @@ class Supervisor:
         ]
         for t in background:
             t.start()
+        self.drift_mode.poll()  # before the first frame
+        self.drift_mode.start()
         try:
             while not self._stop.is_set():
                 self.sync()
@@ -89,7 +98,9 @@ class Supervisor:
         except ValueError as exc:
             log.error("camera %s: invalid stream_url %r: %s", camera_id, url, exc)
             return
-        worker = CameraWorker(camera_id, source, self.config, self.store, self.publish)
+        worker = CameraWorker(
+            camera_id, source, self.config, self.store, self.publish, drift=self.drift_params
+        )
         worker.start()
         self.workers[camera_id] = worker
         self._urls[camera_id] = url

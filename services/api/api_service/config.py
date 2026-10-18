@@ -16,6 +16,7 @@ _ENV = {
     "ws_max_drops": "API_WS_MAX_DROPS",
     "mlflow_cache_seconds": "API_MLFLOW_CACHE_SECONDS",
     "max_page_size": "API_MAX_PAGE_SIZE",
+    "drift_reports_dir": "DRIFT_REPORTS_DIR",
 }
 
 
@@ -37,6 +38,7 @@ class ApiConfig:
     ws_max_drops: int = 5000
     mlflow_cache_seconds: float = 60.0
     max_page_size: int = 200
+    drift_reports_dir: Path = Path("/data/drift_reports")  # ml-monitor's Evidently HTML reports
 
     @property
     def origins(self) -> list[str]:

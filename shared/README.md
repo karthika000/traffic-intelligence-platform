@@ -12,6 +12,7 @@ Shared Python package installed into every service image (and your `.venv` for l
 | `traffic_common.schemas` | Pydantic v2 message schemas and `TOPIC_SCHEMAS` (topic -> schema) |
 | `traffic_common.messaging` | `TypedProducer` / `TypedConsumer` on confluent-kafka |
 | `traffic_common.db` | SQLAlchemy 2.0 models, engine helpers, Alembic migrations, demo seed data |
+| `traffic_common.driftmode` | The demo drift mode: settings and presets, reading and switching it in Postgres, `DriftModeWatcher` for services, and a CLI (`python -m traffic_common.driftmode on\|off\|status`) |
 
 `import traffic_common` only loads config, logging and lifecycle. Import `schemas`, `messaging` and `db` explicitly.
 
@@ -90,7 +91,7 @@ with Session() as s:
     cameras = s.query(models.Camera).all()
 ```
 
-Tables: `cameras`, `traffic_metrics`, `detection_aggregates`, `reports`, `nlp_results`, `anomalies`, `incidents`, `incident_evidence`, `summaries`, `model_versions`, `drift_reports`, plus the simulator's ground truth: `scenario_runs` and `simulated_reports` (migration `0002`). `TextReport` and `RawEvent` carry an optional `scenario_id`, set on messages from simulated scenario runs. Every table with a `camera_id` has a composite index on `(camera_id, <time>)` and a separate index on the time column. Enums are stored as strings with CHECK constraints.
+Tables: `cameras`, `traffic_metrics`, `detection_aggregates`, `reports`, `nlp_results`, `anomalies`, `incidents`, `incident_evidence`, `summaries`, `model_versions` (with `promotion`, the promotion gate's decision), `drift_reports` (grouped by `check_id`), `drift_mode` and `drift_mode_events`, `retraining_recommendations`, plus the simulator's ground truth: `scenario_runs` and `simulated_reports` (migration `0002`; `text_style` marks reports written in drift mode). `TextReport` and `RawEvent` carry an optional `scenario_id`, set on messages from simulated scenario runs. Every table with a `camera_id` has a composite index on `(camera_id, <time>)` and a separate index on the time column. Enums are stored as strings with CHECK constraints.
 
 Migrations ship inside the package, so they run from any directory and inside any service image:
 

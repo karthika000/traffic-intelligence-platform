@@ -27,6 +27,7 @@ class IngestConfig:
     retry_initial_seconds: float = 2.0
     retry_max_seconds: float = 60.0
     source_timeout_seconds: float = 10.0
+    drift_mode_poll_seconds: float = 5.0  # how often drift mode (demo degradation) is re-read
 
     def __post_init__(self) -> None:
         if self.sample_fps <= 0:
@@ -65,5 +66,8 @@ class IngestConfig:
             retry_max_seconds=_float("SOURCE_RETRY_MAX_SECONDS", d["retry_max_seconds"].default),
             source_timeout_seconds=_float(
                 "SOURCE_TIMEOUT_SECONDS", d["source_timeout_seconds"].default
+            ),
+            drift_mode_poll_seconds=_float(
+                "DRIFT_MODE_POLL_SECONDS", d["drift_mode_poll_seconds"].default
             ),
         )
