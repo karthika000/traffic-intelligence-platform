@@ -11,6 +11,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from traffic_common.health import heartbeat
+
 log = logging.getLogger(__name__)
 
 
@@ -75,7 +77,9 @@ class Scheduler:
         return max(0.0, self.next_due - self._clock())
 
     def run_forever(self) -> None:
+        hb = heartbeat("scheduler")  # healthcheck; silent while a check runs (minutes)
         while not self._stop.is_set():
+            hb.beat()
             self.run_pending()
             # Short waits, so trigger() and shutdown take effect within a second.
             if self._stop.wait(min(self.seconds_until_due(), 1.0)):

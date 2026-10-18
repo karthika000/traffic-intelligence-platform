@@ -10,6 +10,9 @@ TypedConsumer
     dead-letter topic (``dlq.<group>``). Handler failures are retried with exponential
     backoff; messages that fail validation go to the dead-letter topic immediately.
     Stops on SIGINT/SIGTERM via the shared shutdown event in ``traffic_common.lifecycle``.
+    Every poll beats the heartbeat ``consumer-<group>`` (``traffic_common.health``) with the
+    number of partitions assigned, so the container healthcheck sees a consumer that is
+    polling and owns partitions, not just a live process.
     With ``batch_handler`` and ``max_batch`` > 1, messages that are already waiting are handed
     over together (up to max_batch, never waiting to fill a batch); if a batch fails, its
     messages are retried one by one with the usual retries and dead-lettering.
@@ -24,6 +27,7 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError, KafkaException, Message, Producer
 from pydantic import BaseModel, ValidationError
 
+from traffic_common.health import heartbeat
 from traffic_common.lifecycle import (
     install_signal_handlers,
     on_shutdown,
@@ -195,6 +199,8 @@ class TypedConsumer:
         self._max_backoff = max_backoff
         self._poll_timeout = poll_timeout
         self._dead_letter_timeout = dead_letter_timeout
+        self.health = heartbeat(f"consumer-{group_id}")
+        self._assigned: set[tuple[str, int]] = set()
         self._uses_process_shutdown = stop_event is None
         self._stop = stop_event or shutdown_event()
         self._consumer = Consumer(
@@ -221,10 +227,16 @@ class TypedConsumer:
     def run(self) -> None:
         """Consume until the stop event is set. Blocks the calling thread."""
         install_signal_handlers(log)
-        self._consumer.subscribe(self.topics)
+        self._consumer.subscribe(
+            self.topics,
+            on_assign=self._on_assign,
+            on_revoke=self._on_revoke,
+            on_lost=self._on_revoke,
+        )
         log.info("consuming %s as group %s", self.topics, self.group_id)
         try:
             while not self._stop.is_set():
+                self.health.beat(assigned=len(self._assigned))
                 msg = self._consumer.poll(self._poll_timeout)
                 if msg is None or not self._ok(msg):
                     continue
@@ -236,6 +248,19 @@ class TypedConsumer:
                 self._process_batch([msg, *(m for m in more if self._ok(m))])
         finally:
             self._close()
+
+    @property
+    def assigned_partitions(self) -> int:
+        return len(self._assigned)
+
+    def _on_assign(self, _consumer: Consumer, partitions: list) -> None:
+        self._assigned |= {(p.topic, p.partition) for p in partitions}
+        log.info("group %s assigned %d partition(s)", self.group_id, len(self._assigned))
+        self.health.beat(assigned=len(self._assigned))
+
+    def _on_revoke(self, _consumer: Consumer, partitions: list) -> None:
+        self._assigned -= {(p.topic, p.partition) for p in partitions}
+        self.health.beat(assigned=len(self._assigned))
 
     @staticmethod
     def _ok(msg: Message) -> bool:

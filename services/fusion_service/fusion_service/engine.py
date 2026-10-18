@@ -16,6 +16,9 @@ recent metrics); a sliding window (``window_seconds``) bounds what can be groupe
   ``clear_min_seconds``) or nothing new has arrived for ``quiet_seconds``.
 - Reports with no camera match wait in an "unlocated" pool and join an open incident whose
   reports name the same place.
+- Start time: the first evidence that supports the incident's (current, finally its last) type,
+  not the earliest evidence attached; that is kept as ``first_evidence_at``. Attaching takes in
+  the camera's recent reports, so the earliest can be a background report from minutes before.
 """
 
 import logging
@@ -220,12 +223,17 @@ class FusionEngine:
     def _evidence(self, inc: FusedIncident, row: dict) -> None:
         self._pending.setdefault(str(inc.incident_id), []).append(row)
 
+    @staticmethod
+    def _saw(inc: FusedIncident, ts: datetime) -> None:
+        first = inc.first_evidence_at
+        inc.first_evidence_at = ts if first is None else min(first, ts)
+
     def _attach_anomaly(self, inc: FusedIncident, a: AnomalyEvidence, reason: str) -> None:
         new = a.anomaly_id not in inc.anomalies
         inc.anomalies[a.anomaly_id] = a
         inc.last_evidence_at = max(inc.last_evidence_at, a.last_seen)
         if new:
-            inc.start_time = min(inc.start_time, a.started_at)
+            self._saw(inc, a.started_at)
             self._evidence(
                 inc,
                 {
@@ -273,11 +281,13 @@ class FusionEngine:
         return type_compatibility(inc.incident_type, ev.incident_type) >= self.cfg.min_compatibility
 
     def _try_attach_report(self, inc: FusedIncident, ev: ReportEvidence, now: datetime) -> bool:
-        if ev.report_id in inc.reports or ev.ts < inc.start_time - self.window:
+        earliest = inc.first_evidence_at or inc.suspected_at
+        if ev.report_id in inc.reports or ev.ts < earliest - self.window:
             return False
         if not self._report_fits(inc, ev):
             return False
         inc.reports[ev.report_id] = ev
+        self._saw(inc, ev.ts)
         if ev.stage == "cleared":
             inc.cleared_at = inc.cleared_at or ev.ts
             self._note(inc, "clearing report")
@@ -420,8 +430,7 @@ class FusionEngine:
                 self._attach_anomaly(inc, a, "anomaly attached")
         for ev in sorted(self.reports.get(camera_id, {}).values(), key=lambda e: e.ts):
             if ev.ts >= horizon and ev.stage == "active" and ev.report_id not in taken_reports:
-                if self._try_attach_report(inc, ev, now):
-                    inc.start_time = min(inc.start_time, ev.ts)
+                self._try_attach_report(inc, ev, now)
         self._attach_unlocated(inc, now)
         self._attach_metric(inc, "created")
         log.info("incident %s created on %s (%s)", inc.incident_id, camera_id, why)
@@ -437,6 +446,7 @@ class FusionEngine:
         if new_type != inc.incident_type:
             self._note(inc, f"type {inc.incident_type} -> {new_type}")
             inc.incident_type = new_type
+        inc.start_time = self._start_time(inc, now)
         active = [r for r in inc.reports.values() if r.stage == "active"]
         text_sev = robust_text_severity(
             [r.severity for r in active if r.severity], self.cfg.min_severity_reports
@@ -455,6 +465,34 @@ class FusionEngine:
         recent = parts["text"].get("recent_supporting_reports", 0)
         if inc.active_anomaly or recent >= self.cfg.min_text_reports:
             inc.last_active_at = now
+
+    def _start_time(self, inc: FusedIncident, now: datetime) -> datetime:
+        """The first evidence supporting the incident's type: active reports of that type and
+        reliable anomalies whose hints agree with it (``confirm_min_agreement``). Of those,
+        only the run that led to the incident firing counts: walking back from the evidence
+        around ``suspected_at``, a gap over ``start_gap_seconds`` ends it, so a same-type
+        background report minutes earlier doesn't become the start. Without any supporting
+        evidence (yet), the earliest evidence attached."""
+        t = inc.incident_type
+        times = sorted(
+            [r.ts for r in inc.reports.values() if r.stage == "active" and r.incident_type == t]
+            + [
+                a.started_at
+                for a in inc.anomalies.values()
+                if a.traffic
+                and not a.degraded
+                and hint_agreement(a.hints, t) >= self.cfg.confirm_min_agreement
+            ]
+        )
+        if not times:
+            return min(inc.first_evidence_at or inc.suspected_at, now)
+        gap = timedelta(seconds=self.cfg.start_gap_seconds)
+        # The supporting evidence nearest the moment the incident fired (the burst, or the
+        # anomaly), or the latest before it.
+        i = next((k for k, ts in enumerate(times) if ts >= inc.suspected_at - gap), len(times) - 1)
+        while i > 0 and times[i] - times[i - 1] <= gap:
+            i -= 1
+        return min(times[i], now)
 
     def _lifecycle(self, inc: FusedIncident, now: datetime) -> None:
         c = inc.components

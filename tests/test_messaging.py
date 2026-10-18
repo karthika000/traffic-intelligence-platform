@@ -202,6 +202,26 @@ def test_consumer_processes_and_commits(scratch: Scratch) -> None:
     assert scratch.committed_offset() == 3
 
 
+def test_consumer_heartbeat_reports_its_partitions(scratch: Scratch, tmp_path, monkeypatch) -> None:
+    from traffic_common import health
+
+    monkeypatch.setenv("HEALTH_DIR", str(tmp_path))
+    stop = threading.Event()
+    c = scratch.consumer(lambda m: None, stop)
+    name = f"consumer-{scratch.group}"
+    healthy: list[dict] = []
+
+    def assigned_and_healthy() -> bool:
+        if not healthy and c.assigned_partitions == 1 and health.check(name, 60) is None:
+            healthy.append(json.loads((tmp_path / f"{name}.json").read_text()))
+        return bool(healthy)
+
+    run_until(c, stop, assigned_and_healthy)
+    assert healthy[0]["assigned"] == 1
+    # Closing revokes the partitions: a stopped consumer doesn't look healthy.
+    assert health.check(name, 60) == f"{name}: no partitions assigned"
+
+
 def test_invalid_messages_go_to_dlq_and_are_committed(scratch: Scratch) -> None:
     good = metrics(count=99).model_dump_json().encode()
     wrong_shape = json.dumps({"camera_id": "cam-a", "vehicle_count": "lots"}).encode()

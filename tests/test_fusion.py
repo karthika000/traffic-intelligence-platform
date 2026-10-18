@@ -286,6 +286,50 @@ def test_window_groups_evidence_and_old_reports_stay_out(engine) -> None:
     assert only(engine, other) is not inc  # per camera
 
 
+def test_start_time_is_the_first_supporting_evidence_not_background(engine) -> None:
+    # Background reports from before the event join the incident (they are inside the window
+    # and their types fit), but the accident didn't start with them.
+    engine.on_nlp(report(0, "congestion", source="news"), at(0))  # another type
+    engine.on_nlp(report(100, source="news"), at(100))  # same type, 5 min before the burst
+    engine.on_nlp(report(330, source="police"), at(330))  # 70 s before it: part of the run
+    burst(engine, 400)
+    inc = only(engine)
+    assert len(inc.reports) == 7
+    assert inc.first_evidence_at == at(0)
+    assert inc.start_time == at(330)
+    from fusion_service.service import to_message
+
+    msg = to_message(inc, [], {})  # the published Incident carries both
+    assert msg.start_time == at(330) and msg.first_evidence_at == at(0)
+
+
+def test_start_time_follows_the_final_type(engine) -> None:
+    # Queue reports open a congestion incident; reports of what caused it arrive later and
+    # outvote them. The accident starts with its own first report, not the queue reports.
+    burst(engine, 0, incident_type="congestion")
+    inc = only(engine)
+    assert inc.incident_type == "congestion" and inc.start_time == at(0)
+    burst(engine, 300)
+    assert inc.incident_type == "accident"
+    assert inc.start_time == at(300) and inc.first_evidence_at == at(0)
+    # A speed-drop anomaly supports an accident too: when it started is now the start.
+    engine.on_anomaly(anomaly(320, hints=("speed_drop",), started=250), at(320))
+    assert inc.start_time == at(250)
+
+
+def test_start_time_survives_a_restart_round_trip(engine) -> None:
+    from fusion_service.model import FusedIncident
+
+    engine.on_nlp(report(0, source="news"), at(0))
+    burst(engine, 400)
+    inc = only(engine)
+    copy = FusedIncident.from_dict(inc.to_dict())
+    assert (copy.start_time, copy.first_evidence_at) == (at(400), at(0))
+    old = inc.to_dict()
+    del old["first_evidence_at"]  # saved before the field existed: start_time was the earliest
+    assert FusedIncident.from_dict(old).first_evidence_at == at(400)
+
+
 def test_long_running_anomaly_does_not_create_an_incident(engine) -> None:
     aid = uuid.uuid4()
     engine.on_anomaly(anomaly(0, anomaly_id=aid, started=0), at(0))

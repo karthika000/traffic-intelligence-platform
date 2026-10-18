@@ -90,9 +90,13 @@ class FusedIncident:
     status: str  # suspected | confirmed | resolved
     incident_type: str
     severity: str
+    # When the incident of its current type began: the first evidence supporting that type
+    # (FusionEngine._start_time). first_evidence_at is the earliest evidence attached at all,
+    # which can be a background report from before the event.
     start_time: datetime
     suspected_at: datetime
     last_evidence_at: datetime
+    first_evidence_at: datetime | None = None
     confirmed_at: datetime | None = None
     end_time: datetime | None = None
     # Last time the incident was "firing" (anomaly active, or a burst of recent supporting
@@ -138,6 +142,7 @@ class FusedIncident:
             "start_time": _iso(self.start_time),
             "suspected_at": _iso(self.suspected_at),
             "last_evidence_at": _iso(self.last_evidence_at),
+            "first_evidence_at": _iso(self.first_evidence_at),
             "last_active_at": _iso(self.last_active_at),
             "confirmed_at": _iso(self.confirmed_at),
             "end_time": _iso(self.end_time),
@@ -166,6 +171,8 @@ class FusedIncident:
             start_time=_ts(d["start_time"]),
             suspected_at=_ts(d["suspected_at"]),
             last_evidence_at=_ts(d["last_evidence_at"]),
+            # states saved before first_evidence_at existed kept the earliest one in start_time
+            first_evidence_at=_ts(d.get("first_evidence_at") or d["start_time"]),
             last_active_at=_ts(d.get("last_active_at")),
             confirmed_at=_ts(d.get("confirmed_at")),
             end_time=_ts(d.get("end_time")),

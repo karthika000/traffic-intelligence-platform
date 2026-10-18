@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { incident, summary } from "../test/fixtures";
-import { capIncidents, feed, headline, isNewer, upsertIncidents, upsertSummaries } from "./incidents";
+import { capIncidents, detectedAt, feed, headline, isNewer, sortIncidents, startedAt, upsertIncidents, upsertSummaries } from "./incidents";
 
 describe("incident feed logic", () => {
   it("updates an incident in place when a newer version arrives", () => {
@@ -56,5 +56,23 @@ describe("incident feed logic", () => {
     expect(headline(incident(), s["inc-1"])).toBe("v2 headline");
     expect(headline(incident(), undefined)).toBe("Accident at Hyde Park Corner");
     expect(upsertSummaries({}, [summary({ scope: "camera" })])).toEqual({});
+  });
+});
+
+describe("incident times", () => {
+  it("shows the start of the supporting evidence, not the earliest evidence attached", () => {
+    const i = incident({
+      first_evidence_at: "2026-10-17T08:52:00Z", // a background report from before the event
+      start_time: "2026-10-17T08:59:30Z",
+      suspected_at: "2026-10-17T09:00:00Z",
+    });
+    expect(startedAt(i)).toBe("2026-10-17T08:59:30Z");
+    expect(detectedAt(i)).toBe("2026-10-17T09:00:00Z");
+  });
+
+  it("sorts by detection, so a later start time doesn't reorder the feed", () => {
+    const older = incident({ incident_id: "a", suspected_at: "2026-10-17T09:00:00Z", start_time: "2026-10-17T09:06:00Z" });
+    const newer = incident({ incident_id: "b", suspected_at: "2026-10-17T09:05:00Z", start_time: "2026-10-17T09:04:00Z" });
+    expect(sortIncidents([older, newer]).map((i) => i.incident_id)).toEqual(["b", "a"]);
   });
 });

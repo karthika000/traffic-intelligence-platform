@@ -284,7 +284,8 @@ class Incident(Base):
     fused_confidence: Mapped[float]
     confidence_components: Mapped[dict[str, Any]] = mapped_column(server_default=_empty_json())
     vision_degraded: Mapped[bool] = mapped_column(server_default=text("false"))
-    start_time: Mapped[datetime]
+    start_time: Mapped[datetime]  # first evidence supporting the incident's type
+    first_evidence_at: Mapped[datetime | None]  # earliest evidence attached (may predate it)
     suspected_at: Mapped[datetime | None]
     confirmed_at: Mapped[datetime | None]
     end_time: Mapped[datetime | None]

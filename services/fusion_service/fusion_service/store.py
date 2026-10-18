@@ -76,6 +76,7 @@ class IncidentStore:
             "confidence_components": inc.components,
             "vision_degraded": inc.vision_degraded,
             "start_time": inc.start_time,
+            "first_evidence_at": inc.first_evidence_at,
             "suspected_at": inc.suspected_at,
             "confirmed_at": inc.confirmed_at,
             "end_time": inc.end_time,

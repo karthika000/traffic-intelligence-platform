@@ -22,13 +22,20 @@ export function upsertIncidents(map: IncidentMap, incoming: Incident[]): Inciden
   return out;
 }
 
-export const startedAt = (i: Incident) => i.suspected_at ?? i.start_time;
+/**
+ * When the incident began: the first evidence supporting its type (fusion's start_time). Not
+ * first_evidence_at, the earliest evidence attached, which can be a background report from
+ * minutes before the event.
+ */
+export const startedAt = (i: Incident) => i.start_time;
+/** When fusion raised it. Lists sort by this, so a new incident lands on top and stays put. */
+export const detectedAt = (i: Incident) => i.suspected_at ?? i.start_time;
 export const isOpen = (i: Incident) => i.status !== "resolved";
 
-/** Newest first by when the incident started; ties by id so the order is stable. */
+/** Newest first by when the incident was detected; ties by id so the order is stable. */
 export function sortIncidents(list: Incident[]): Incident[] {
   return [...list].sort((a, b) => {
-    const d = new Date(startedAt(b)).getTime() - new Date(startedAt(a)).getTime();
+    const d = new Date(detectedAt(b)).getTime() - new Date(detectedAt(a)).getTime();
     return d !== 0 ? d : a.incident_id < b.incident_id ? -1 : 1;
   });
 }

@@ -16,6 +16,9 @@ class FusionConfig:
     min_text_sources: int = 2
     min_report_confidence: float = 0.5  # classifier confidence below this is ignored
     min_compatibility: float = 0.5  # a report joins an incident if its type fits this well
+    # --- start time: the first evidence supporting the incident's type, in the run of such
+    # evidence (gaps of at most this long) that led to the incident firing
+    start_gap_seconds: float = 120.0
     # --- unlocated reports (no camera match): attach when a place entity matches one of an
     # open incident's place entities at least this well (fuzzy ratio 0-1)
     unlocated_match_score: float = 0.88

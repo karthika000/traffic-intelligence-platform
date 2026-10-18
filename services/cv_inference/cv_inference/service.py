@@ -25,6 +25,7 @@ from cv_inference.registry import ResolvedModel, record_model_version, resolve_m
 from cv_inference.zones import ZoneConfig
 from traffic_common.config import Settings
 from traffic_common.db.models import Camera, TrafficMetric
+from traffic_common.health import heartbeat
 from traffic_common.messaging import TypedConsumer, TypedProducer
 from traffic_common.schemas import FrameMessage, TrafficMetrics
 from traffic_common.topics import ConsumerGroup, Topic
@@ -277,6 +278,7 @@ class CvService:
                 default_frame_width_metres=self.cfg.default_frame_width_metres,
             )
         self.producer.send(Topic.DETECTIONS, result.detection)
+        heartbeat("inference").beat()  # healthcheck: frames are being processed
         ctx.stats.lag_ms.append(frame_age_seconds(frame) * 1000)
         ctx.stats.processed += 1
         if result.metrics is not None:

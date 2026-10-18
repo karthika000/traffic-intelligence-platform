@@ -20,6 +20,7 @@ import argparse
 import html
 import json
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -45,6 +46,7 @@ COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 USER_AGENT = "traffic-intelligence-platform/0.1 (sample video download script; python-urllib)"
 MAX_BYTES = 150 * 1024 * 1024
 PREFERRED_HEIGHTS = (720, 480, 360)
+TRANSIENT_HTTP = {429, 500, 502, 503, 504}
 
 CAMERA_VIDEOS = {
     "cam-hyde-park-corner": "File:London roundabout.ogg",
@@ -64,10 +66,34 @@ class Result:
     page_url: str
 
 
+def with_retries(fn, what: str, attempts: int = 5):
+    """Call ``fn``, retrying rate limiting (429), server errors and network failures (resets,
+    TLS EOFs, timeouts) with backoff. Wikimedia rate-limits bursts, and a fresh install fetches
+    four videos plus their metadata in a few seconds."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except urllib.error.HTTPError as exc:  # before URLError: it is a subclass
+            if exc.code not in TRANSIENT_HTTP or attempt == attempts:
+                raise
+            retry_after = exc.headers.get("Retry-After", "")
+            delay = int(retry_after) if retry_after.isdigit() else 5 * attempt
+            reason = f"HTTP {exc.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError) as exc:
+            if attempt == attempts:
+                raise
+            delay, reason = 5 * attempt, str(getattr(exc, "reason", exc))
+        print(f"  {what}: {reason}; retrying in {delay}s (attempt {attempt + 1}/{attempts})")
+        time.sleep(min(max(delay, 1), 120))
+
+
 def _get_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)
+    def get() -> dict:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+
+    return with_retries(get, "Commons API")
 
 
 def _strip_html(value: str) -> str:
@@ -101,19 +127,8 @@ def pick_download(info: dict) -> tuple[str, str]:
     return url, Path(urllib.parse.urlparse(url).path).suffix or ".webm"
 
 
-def download(url: str, dest: Path, attempts: int = 4) -> None:
-    """Download with retries on rate limiting (429) and temporary unavailability (503)."""
-    for attempt in range(1, attempts + 1):
-        try:
-            _download_once(url, dest)
-            return
-        except urllib.error.HTTPError as exc:
-            if exc.code not in (429, 503) or attempt == attempts:
-                raise
-            retry_after = exc.headers.get("Retry-After", "")
-            delay = int(retry_after) if retry_after.isdigit() else 10 * attempt
-            print(f"  HTTP {exc.code}; retrying in {delay}s (attempt {attempt + 1}/{attempts})")
-            time.sleep(min(delay, 120))
+def download(url: str, dest: Path) -> None:
+    with_retries(lambda: _download_once(url, dest), "download")
 
 
 def _download_once(url: str, dest: Path) -> None:

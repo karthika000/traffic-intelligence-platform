@@ -105,6 +105,7 @@ def incident(row: Any) -> Incident:
         confidence_components=m["confidence_components"] or {},
         vision_degraded=m["vision_degraded"],
         start_time=m["start_time"],
+        first_evidence_at=m.get("first_evidence_at"),
         suspected_at=m["suspected_at"],
         confirmed_at=m["confirmed_at"],
         end_time=m["end_time"],

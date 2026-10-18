@@ -5,6 +5,7 @@ import { keys, useCameras, useIncident } from "../api/queries";
 import type { Incident, IncidentDetail as Detail, IncidentVersion, Summary } from "../api/types";
 import { CongestionChip, Empty, ErrorNote, Panel, ScoreBar, SeverityChip, Skeleton, StatusChip, Tag } from "../components/ui";
 import { dateTime, num, pct, shortId, titleCase } from "../lib/format";
+import { startedAt } from "../lib/incidents";
 import { severityStyle } from "../lib/scales";
 import { useTheme } from "../lib/theme";
 import { type Components, confidenceParts } from "../lib/confidence";
@@ -311,7 +312,13 @@ export function IncidentDetail() {
             )}
           </div>
           <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs min-w-[240px]">
-            <dt className="text-faint">Started</dt><dd className="tabular-nums">{dateTime(i.start_time, true)}</dd>
+            <dt className="text-faint" title="first evidence supporting the incident's type">Started</dt><dd className="tabular-nums">{dateTime(startedAt(i), true)}</dd>
+            {i.first_evidence_at && i.first_evidence_at !== i.start_time && (
+              <>
+                <dt className="text-faint" title="earliest evidence attached, of any type (can predate the incident)">First evidence</dt>
+                <dd className="tabular-nums">{dateTime(i.first_evidence_at, true)}</dd>
+              </>
+            )}
             <dt className="text-faint">Suspected</dt><dd className="tabular-nums">{dateTime(i.suspected_at, true)}</dd>
             <dt className="text-faint">Confirmed</dt><dd className="tabular-nums">{dateTime(i.confirmed_at, true)}</dd>
             <dt className="text-faint">Ended</dt><dd className="tabular-nums">{i.end_time ? dateTime(i.end_time, true) : "–"}</dd>

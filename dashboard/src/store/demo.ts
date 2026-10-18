@@ -7,7 +7,7 @@
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import type { Incident, IncidentDetail } from "../api/types";
-import { startedAt } from "../lib/incidents";
+import { detectedAt } from "../lib/incidents";
 
 export type TrackedRun = {
   scenarioId: string;
@@ -66,8 +66,8 @@ export function matchIncident(run: TrackedRun, incidents: Incident[]): Incident 
   const t = (iso: string) => new Date(iso).getTime();
   const onCamera = incidents.filter((i) => i.camera_id === run.cameraId);
   const fresh = onCamera
-    .filter((i) => t(startedAt(i)) >= from)
-    .sort((a, b) => t(startedAt(a)) - t(startedAt(b)))[0];
+    .filter((i) => t(detectedAt(i)) >= from)
+    .sort((a, b) => t(detectedAt(a)) - t(detectedAt(b)))[0];
   if (fresh) return fresh;
   return onCamera
     .filter((i) => i.status !== "resolved" && t(i.timestamp) >= run.triggeredAt)

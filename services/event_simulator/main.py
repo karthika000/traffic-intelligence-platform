@@ -14,6 +14,7 @@ from event_simulator.groundtruth import GroundTruthStore
 from event_simulator.simulator import Simulator
 from traffic_common import get_logger, get_settings, shutdown_event
 from traffic_common.db import create_db_engine
+from traffic_common.health import heartbeat
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedConsumer, TypedProducer
 from traffic_common.topics import ConsumerGroup, Topic
@@ -34,7 +35,14 @@ def main() -> None:
     producer = TypedProducer(settings.kafka_bootstrap_servers, client_id=SERVICE_NAME)
     engine = create_db_engine(settings.postgres_url)
     store = GroundTruthStore(engine)
-    simulator = Simulator(config, engine, Emitter(producer.send, store), store, stop)
+    emitted = heartbeat("emitter")  # healthcheck: reports and sensor events are going out
+
+    def send(topic, message):
+        sent = producer.send(topic, message)
+        emitted.beat()
+        return sent
+
+    simulator = Simulator(config, engine, Emitter(send, store), store, stop)
 
     control = TypedConsumer(
         [Topic.SIMULATOR_CONTROL],

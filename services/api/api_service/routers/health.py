@@ -1,5 +1,5 @@
 """/health: the process is up. /ready: Postgres and Kafka reachable and the live consumer
-running (the container healthcheck)."""
+running with its partitions assigned (the container healthcheck)."""
 
 import asyncio
 import time
@@ -46,7 +46,12 @@ async def ready(request: Request) -> JSONResponse:
     if hub is None:
         checks["live_consumer"] = "disabled"
     else:
-        checks["live_consumer"] = "ok" if hub.healthy else f"not running {hub.error or ''}".strip()
+        if not hub.healthy:
+            checks["live_consumer"] = f"not running {hub.error or ''}".strip()
+        elif not hub.assigned.is_set():
+            checks["live_consumer"] = "no partitions assigned yet"
+        else:
+            checks["live_consumer"] = "ok"
     ok = all(v in ("ok", "disabled") for v in checks.values())
     body = {"status": "ready" if ok else "not ready", "checks": checks}
     if hub is not None:

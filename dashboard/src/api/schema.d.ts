@@ -971,8 +971,10 @@ export interface components {
          * @description A fused incident, published by fusion_service on creation and on every meaningful
          *     change; ``version`` counts the publications of one ``incident_id`` (1 = created).
          *     ``confidence_components`` explains ``fused_confidence``: per-modality scores, their
-         *     sub-scores and weights (see fusion_service). ``start_time`` is the earliest evidence,
-         *     ``suspected_at`` / ``confirmed_at`` when fusion reached those states.
+         *     sub-scores and weights (see fusion_service). ``start_time`` is the first evidence that
+         *     supports the incident's type; ``first_evidence_at`` the earliest evidence attached at all
+         *     (it can be a background report from before the event); ``suspected_at`` /
+         *     ``confirmed_at`` when fusion reached those states.
          */
         Incident: {
             /**
@@ -1024,6 +1026,8 @@ export interface components {
              * Format: date-time
              */
             start_time: string;
+            /** First Evidence At */
+            first_evidence_at?: string | null;
             /** Suspected At */
             suspected_at?: string | null;
             /** Confirmed At */

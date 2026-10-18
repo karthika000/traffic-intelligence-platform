@@ -278,8 +278,10 @@ class Incident(KafkaMessage):
     """A fused incident, published by fusion_service on creation and on every meaningful
     change; ``version`` counts the publications of one ``incident_id`` (1 = created).
     ``confidence_components`` explains ``fused_confidence``: per-modality scores, their
-    sub-scores and weights (see fusion_service). ``start_time`` is the earliest evidence,
-    ``suspected_at`` / ``confirmed_at`` when fusion reached those states."""
+    sub-scores and weights (see fusion_service). ``start_time`` is the first evidence that
+    supports the incident's type; ``first_evidence_at`` the earliest evidence attached at all
+    (it can be a background report from before the event); ``suspected_at`` /
+    ``confirmed_at`` when fusion reached those states."""
 
     incident_id: UUID = Field(default_factory=uuid4)
     camera_id: CameraId
@@ -291,6 +293,7 @@ class Incident(KafkaMessage):
     confidence_components: dict[str, Any] = Field(default_factory=dict)
     vision_degraded: bool = False  # vision evidence seen during a system-wide degradation
     start_time: UtcDatetime
+    first_evidence_at: UtcDatetime | None = None
     suspected_at: UtcDatetime | None = None
     confirmed_at: UtcDatetime | None = None
     end_time: UtcDatetime | None = None

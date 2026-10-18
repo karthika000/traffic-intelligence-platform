@@ -49,6 +49,10 @@ log = logging.getLogger(__name__)
 ROOT = Path("data/ml/reference")
 MAX_ROWS = 20_000
 MIN_REAL_ROWS = 2_000
+# vehicle-detector: about 2.5 minutes of the four demo cameras at 5 fps. On a fresh install
+# ml-monitor's first check comes before cv_inference has produced much; refusing then means the
+# next check builds a real reference instead of saving a near-empty one for good.
+MIN_DETECTIONS = 3_000
 TEXT_ROWS = 3_000
 NLP_TRAIN = Path("data/nlp/reports_train.csv")
 
@@ -346,6 +350,11 @@ def build_detector(
                 "--minutes to use a shorter clean window"
             )
     detections = read_detections(bootstrap, start, end)
+    if len(detections) < MIN_DETECTIONS:
+        raise RuntimeError(
+            f"only {len(detections)} detections in the last {minutes:g} min (at least "
+            f"{MIN_DETECTIONS} needed): let cv_inference run for longer first"
+        )
     frame = detection_rows(detections, version)
     if frame.empty:
         frame = detection_rows(detections)  # e.g. a version label cv_inference didn't publish

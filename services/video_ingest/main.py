@@ -9,6 +9,7 @@ import logging
 
 from traffic_common import get_logger, get_settings, shutdown_event
 from traffic_common.db import create_db_engine
+from traffic_common.health import heartbeat
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedProducer
 from traffic_common.schemas import FrameMessage
@@ -31,8 +32,11 @@ def main() -> None:
 
     producer = TypedProducer(settings.kafka_bootstrap_servers, client_id=SERVICE_NAME)
 
+    frames = heartbeat("frames")  # healthcheck: some camera is publishing frames
+
     def publish(message: FrameMessage) -> None:
         producer.send(Topic.VIDEO_FRAMES, message)
+        frames.beat()
 
     engine = create_db_engine(settings.postgres_url)
     try:

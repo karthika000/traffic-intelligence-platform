@@ -16,6 +16,7 @@ from anomaly_service.models import ModelManager
 from anomaly_service.service import AnomalyService
 from traffic_common import get_logger, get_settings, shutdown_event
 from traffic_common.db import create_db_engine
+from traffic_common.health import heartbeat
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedConsumer, TypedProducer
 from traffic_common.topics import ConsumerGroup, Topic
@@ -60,18 +61,23 @@ def main() -> None:
         auto_offset_reset="earliest",
     )
 
-    def every(interval: float, fn) -> None:
+    def every(interval: float, fn, beat: str | None = None) -> None:
+        """Run ``fn`` every ``interval`` s; ``beat`` names a heartbeat for each success."""
+        hb = heartbeat(beat) if beat else None
         while not stop.wait(interval):
             try:
                 fn()
             except Exception:
                 log.exception("%s failed", fn.__name__)
+            else:
+                if hb is not None:
+                    hb.beat()
 
     threads = [
         threading.Thread(target=consumer.run, name="consumer", daemon=True),
         threading.Thread(
             target=every,
-            args=(config.score_interval_seconds, service.score_all),
+            args=(config.score_interval_seconds, service.score_all, "scoring"),
             name="scoring",
             daemon=True,
         ),

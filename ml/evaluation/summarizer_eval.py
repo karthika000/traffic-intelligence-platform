@@ -5,7 +5,9 @@
 Reference set (~40 contexts): the stored incidents (facts from Postgres), topped up with
 contexts built from scenario ground truth (every phase of every scenario run: its type, peak
 severity so far, status, and loop-detector speeds from the phase's speed factor; the camera,
-whose looped footage doesn't show simulated incidents, stays at its usual speed). With
+whose looped footage doesn't show simulated incidents, stays at its usual speed). On a fresh
+install, with no completed runs yet, the same contexts are built from the scenario definitions
+(``--scenarios-dir``) as if each scenario had run once on each camera. With
 ``--reference-set`` (default data/summarizer/reference_set.json, when present) exactly those
 contexts are used, so runs stay comparable. Reference summaries are written from the same facts
 in a different style (ml.summarize.reference).
@@ -26,12 +28,16 @@ Everything is logged to MLflow experiment "incident-summarizer".
 import argparse
 import json
 import os
+import re
 import tempfile
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import yaml
 from sqlalchemy import text
 
 from ml.summarize import faithfulness
@@ -70,62 +76,112 @@ def scenario_contexts(conn) -> list[IncidentContext]:
             "WHERE r.status = 'completed' ORDER BY r.started_at"
         )
     ).all()
-    out = []
-    for run in runs:
-        phases = run.definition.get("phases", [])
-        timeline = run.timeline or []
-        peak, reports, sources = "low", 0, set()
-        for i, (phase, actual) in enumerate(zip(phases, timeline, strict=False)):
-            peak = max(peak, phase["severity"], key=SEVERITIES.index)
-            per_min = (phase.get("reports") or {}).get("per_minute", 0)
-            reports += round(per_min * phase["duration"] / 60)
-            sources |= {
-                SOURCE_MAP.get(s, s) for s in (phase.get("reports") or {}).get("sources", {})
-            }
-            factor = (phase.get("traffic") or {}).get("speed_factor", 1.0)
-            status = "suspected" if i == 0 else "resolved" if i == len(phases) - 1 else "confirmed"
-            congestion = (
-                "standstill"
-                if factor < 0.25
-                else "heavy"
-                if factor < 0.5
-                else "moderate"
-                if factor < 0.8
-                else "free_flow"
+    return [ctx for run in runs for ctx in run_contexts(run)]
+
+
+def _seconds(value) -> float:
+    """A scenario duration: seconds, or "90s" / "2m" / "1h"."""
+    if isinstance(value, int | float):
+        return float(value)
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*", str(value))
+    if not m:
+        raise ValueError(f"bad duration {value!r}")
+    return float(m[1]) * {"": 1, "s": 1, "m": 60, "h": 3600}[m[2]]
+
+
+def definition_contexts(conn, scenarios_dir: Path) -> list[IncidentContext]:
+    """Contexts as scenario_contexts() would build them, from the scenario definitions instead
+    of completed runs: each scenario run once on each camera, at fixed times so the set is the
+    same on every fresh install."""
+    cameras = conn.execute(text("SELECT id, name, location_name FROM cameras ORDER BY id")).all()
+    files = sorted(scenarios_dir.glob("*.yaml"))
+    if not files:
+        raise SystemExit(f"no scenario definitions in {scenarios_dir.resolve()}")
+    out, start = [], datetime(2026, 1, 15, 7, 0, tzinfo=UTC)
+    for path in files:
+        definition = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for phase in definition["phases"]:
+            phase["duration"] = _seconds(phase["duration"])
+        for camera in cameras:
+            start += timedelta(hours=1)
+            t, timeline = start, []
+            for phase in definition["phases"]:
+                t += timedelta(seconds=phase["duration"])
+                timeline.append({"ends_at": t.isoformat()})
+            run = SimpleNamespace(
+                id=f"definition-{definition['name']}-{camera.id}",
+                camera_id=camera.id,
+                incident_type=definition["incident_type"],
+                started_at=start,
+                timeline=timeline,
+                definition=definition,
+                name=camera.name,
+                location_name=camera.location_name,
             )
-            start = pd.Timestamp(run.started_at).to_pydatetime()
-            out.append(
-                IncidentContext(
-                    incident_id=f"{run.id}:{phase['name']}",
-                    version=i + 1,
-                    camera_id=run.camera_id,
-                    location=run.name,
-                    area=run.location_name,
-                    incident_type=run.incident_type,
-                    severity=peak,
-                    status=status,
-                    start_time=start,
-                    reference_time=pd.Timestamp(actual["ends_at"]).to_pydatetime(),
-                    congestion=congestion,
-                    # Loops see the incident; the looped camera footage doesn't.
-                    speed_kmh=25.0,
-                    baseline_speed_kmh=25.0,
-                    loop_speed_kmh=round(30 * factor, 1),
-                    loop_baseline_kmh=30.0,
-                    stopped_vehicles=max(0, round(4 * (1 - factor) - 1)),
-                    n_reports=reports,
-                    sources=sorted(sources),
-                    vehicles=TYPE_VEHICLES.get(run.incident_type, []),
-                    fused_confidence=round(0.55 + 0.4 * (1 - factor), 2),
-                    vision_present=factor < 0.8,
-                )
-            )
+            out += run_contexts(run)
     return out
 
 
-def build_dataset(engine, size: int, pinned: list[str] | None = None) -> list[IncidentContext]:
+def run_contexts(run) -> list[IncidentContext]:
+    """One context per phase of a scenario run, with the facts as of the end of that phase."""
+    out = []
+    phases = run.definition.get("phases", [])
+    timeline = run.timeline or []
+    peak, reports, sources = "low", 0, set()
+    for i, (phase, actual) in enumerate(zip(phases, timeline, strict=False)):
+        peak = max(peak, phase["severity"], key=SEVERITIES.index)
+        per_min = (phase.get("reports") or {}).get("per_minute", 0)
+        reports += round(per_min * phase["duration"] / 60)
+        sources |= {SOURCE_MAP.get(s, s) for s in (phase.get("reports") or {}).get("sources", {})}
+        factor = (phase.get("traffic") or {}).get("speed_factor", 1.0)
+        status = "suspected" if i == 0 else "resolved" if i == len(phases) - 1 else "confirmed"
+        congestion = (
+            "standstill"
+            if factor < 0.25
+            else "heavy"
+            if factor < 0.5
+            else "moderate"
+            if factor < 0.8
+            else "free_flow"
+        )
+        start = pd.Timestamp(run.started_at).to_pydatetime()
+        out.append(
+            IncidentContext(
+                incident_id=f"{run.id}:{phase['name']}",
+                version=i + 1,
+                camera_id=run.camera_id,
+                location=run.name,
+                area=run.location_name,
+                incident_type=run.incident_type,
+                severity=peak,
+                status=status,
+                start_time=start,
+                reference_time=pd.Timestamp(actual["ends_at"]).to_pydatetime(),
+                congestion=congestion,
+                # Loops see the incident; the looped camera footage doesn't.
+                speed_kmh=25.0,
+                baseline_speed_kmh=25.0,
+                loop_speed_kmh=round(30 * factor, 1),
+                loop_baseline_kmh=30.0,
+                stopped_vehicles=max(0, round(4 * (1 - factor) - 1)),
+                n_reports=reports,
+                sources=sorted(sources),
+                vehicles=TYPE_VEHICLES.get(run.incident_type, []),
+                fused_confidence=round(0.55 + 0.4 * (1 - factor), 2),
+                vision_present=factor < 0.8,
+            )
+        )
+    return out
+
+
+def build_dataset(
+    engine, size: int, pinned: list[str] | None = None, scenarios_dir: Path | None = None
+) -> list[IncidentContext]:
     with engine.connect() as conn:
         synthetic = scenario_contexts(conn)
+        if not synthetic and not pinned and scenarios_dir is not None:
+            synthetic = definition_contexts(conn, scenarios_dir)
+            log.info("no completed scenario runs: %d contexts from the definitions", len(synthetic))
         if pinned:
             by_id = {c.incident_id: c for c in synthetic}
             out = []
@@ -263,6 +319,12 @@ def main() -> None:
     parser.add_argument(
         "--reference-set", type=Path, default=Path("data/summarizer/reference_set.json")
     )
+    parser.add_argument(
+        "--scenarios-dir",
+        type=Path,
+        default=Path(os.getenv("SCENARIOS_DIR", "scenarios")),
+        help="scenario YAML files, used when no scenario run has completed yet",
+    )
     parser.add_argument("--probe", type=int, default=5, help="contexts timed before a full run")
     parser.add_argument("--max-p95", type=float, default=10.0, help="seconds, from the probe")
     parser.add_argument("--min-pass", type=float, default=0.9, help="guard pass rate to promote")
@@ -278,7 +340,9 @@ def main() -> None:
     if args.reference_set and args.reference_set.exists():
         pinned = json.loads(args.reference_set.read_text())["incident_ids"]
         log.info("using the pinned reference set %s", args.reference_set)
-    ctxs = build_dataset(engine, args.size, pinned)
+    ctxs = build_dataset(engine, args.size, pinned, args.scenarios_dir)
+    if not ctxs:
+        raise SystemExit("no contexts to evaluate: no incidents, scenario runs or definitions")
     log.info(
         "reference set: %d contexts (%d stored incidents)",
         len(ctxs),

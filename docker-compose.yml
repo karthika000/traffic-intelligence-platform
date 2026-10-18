@@ -14,21 +14,48 @@ x-python-env: &python-env
   # Zone for clock times in summaries; the dashboard shows times in the same zone.
   DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Europe/London}
 
+# What every app service needs before it starts: healthy Kafka and Postgres, and the schema
+# migrated (the one-shot `migrate` service). Services that need more merge this in.
+x-base-deps: &base-deps
+  kafka:
+    condition: service_healthy
+  postgres:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
 x-python-service: &python-service
   env_file:
     - path: .env
       required: false
   environment: *python-env
-  depends_on:
-    kafka:
-      condition: service_healthy
-    postgres:
-      condition: service_healthy
+  depends_on: *base-deps
   restart: unless-stopped
   networks: [traffic]
 
+# Healthchecks mean "doing its work", not "process up": each service's consumers and main
+# loops write heartbeats (traffic_common.health), and the check fails when one is older than
+# --max-age or a consumer owns no partitions. start_period covers first-run downloads
+# (YOLO weights + OpenVINO export, NER and flan-t5 weights).
+x-health: &health
+  interval: 15s
+  timeout: 10s
+  retries: 3
+  start_period: 120s
+
 services:
   # ---------------------------------------------------------------- app services
+  # One-shot: apply migrations and seed the demo cameras (both idempotent), then exit.
+  # Every app service waits for it to complete successfully.
+  migrate:
+    <<: *python-service
+    build: { context: ., dockerfile: services/api/Dockerfile }
+    command: ["sh", "-c", "python -m traffic_common.db upgrade && python -m traffic_common.db seed"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   video_ingest:
     <<: *python-service
     build: { context: ., dockerfile: services/video_ingest/Dockerfile }
@@ -37,12 +64,18 @@ services:
       - frames:/data/frames             # sampled JPEGs, shared with cv_inference and api
     # Workers may be blocked up to SOURCE_TIMEOUT_SECONDS (10 s) in a stream read.
     stop_grace_period: 20s
+    healthcheck:   # a frame was published in the last minute (needs cameras with videos)
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "frames", "--max-age", "60"]
 
   event_simulator:
     <<: *python-service
     build: { context: ., dockerfile: services/event_simulator/Dockerfile }
     volumes:
       - ./data/nlp:/data/nlp   # generated NLP datasets (python -m event_simulator.dataset)
+    healthcheck:   # reports/sensor events going out, control consumer has its partitions
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "emitter", "consumer-event-simulator", "--max-age", "60"]
 
   cv_inference:
     <<: *python-service
@@ -52,6 +85,16 @@ services:
       - frames:/data/frames:ro
       - annotated:/data/annotated   # latest annotated frame per camera
       - weights:/weights            # YOLO weights, MLflow downloads, OpenVINO export cache
+    depends_on:
+      <<: *base-deps
+      mlflow:
+        condition: service_healthy
+      video_ingest:
+        condition: service_healthy
+    healthcheck:   # frames are being detected, frames consumer has its partitions
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "inference", "consumer-cv-inference", "--max-age", "60"]
+      start_period: 600s
 
   nlp_service:
     <<: *python-service
@@ -59,22 +102,58 @@ services:
     volumes:
       - ./models:/models:ro
       - hf_cache:/hf_cache   # NER weights, downloaded once
+    depends_on:
+      <<: *base-deps
+      mlflow:
+        condition: service_healthy
+    healthcheck:   # polling reports.text with its partitions (after the model and NER loaded)
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "consumer-nlp-service", "--max-age", "60"]
+      start_period: 600s
 
   anomaly_service:
     <<: *python-service
     build: { context: ., dockerfile: services/anomaly_service/Dockerfile }
     volumes:
       - ./models:/models:ro
+    depends_on:
+      <<: *base-deps
+      mlflow:
+        condition: service_healthy
+    healthcheck:   # the scoring loop completes, consumer has its partitions
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "scoring", "consumer-anomaly-service", "--max-age", "60"]
 
+  # Fusion and the summarizer start from the latest offsets, so they wait for their inputs to
+  # be produced before joining (fusion rebuilds recent evidence from Postgres anyway).
   fusion_service:
     <<: *python-service
     build: { context: ., dockerfile: services/fusion_service/Dockerfile }
+    depends_on:
+      <<: *base-deps
+      anomaly_service:
+        condition: service_healthy
+      nlp_service:
+        condition: service_healthy
+    healthcheck:   # the tick loop completes, consumer has its partitions
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "tick", "consumer-fusion-service", "--max-age", "60"]
 
   summarizer:
     <<: *python-service
     build: { context: ., dockerfile: services/summarizer/Dockerfile }
     volumes:
       - hf_cache:/hf_cache   # flan-t5 weights, downloaded once (shared with ml-trainer)
+    depends_on:
+      <<: *base-deps
+      mlflow:
+        condition: service_healthy
+      fusion_service:
+        condition: service_healthy
+    healthcheck:   # the worker loop completes, incidents consumer has its partitions
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "worker", "consumer-summarizer", "--max-age", "60"]
+      start_period: 600s
 
   api:
     <<: *python-service
@@ -85,7 +164,7 @@ services:
       - frames:/data/frames:ro
       - annotated:/data/annotated:ro
       - drift_reports:/data/drift_reports:ro   # Evidently HTML reports written by ml-monitor
-    healthcheck:   # /ready: Postgres and Kafka reachable, live consumer running
+    healthcheck:   # /ready: Postgres and Kafka reachable, live consumer has its partitions
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"]
       interval: 15s
       timeout: 8s
@@ -106,6 +185,13 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:   # the Vite dev server answers
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5173/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
     networks: [traffic]
 
   # -------------------------------------------------------------- infrastructure
@@ -253,13 +339,18 @@ services:
       - drift_reports:/data/drift_reports
       - frames:/data/frames:ro          # brightness/contrast of the frames (vehicle-detector)
       - hf_cache:/hf_cache
-    depends_on:
-      kafka:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+    depends_on:   # last: it checks every model, the detector's on cv_inference's output
+      <<: *base-deps
       mlflow:
         condition: service_healthy
+      cv_inference:
+        condition: service_healthy
+    # Alerts consumer has its partitions; the scheduler loop is alive. The loop is silent while
+    # a check runs (minutes), so it gets 30 minutes.
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-m", "traffic_common.health", "consumer-ml-monitoring", "scheduler:1800", "--max-age", "60"]
+      start_period: 300s
 
   # ------------------------------------------------------------------- ML training
   # Not started by `up`. Run with:
@@ -276,9 +367,11 @@ services:
       GIT_PYTHON_REFRESH: quiet   # MLflow probes git for run metadata; the image has none
       PROMOTION_TOLERANCE: ${PROMOTION_TOLERANCE:-0.01}
       PROMOTION_MIN_IMPROVEMENT: ${PROMOTION_MIN_IMPROVEMENT:-0.005}
+      SCENARIOS_DIR: /workspace/scenarios   # summarizer_eval's reference set on a fresh install
     volumes:
       - ./ml:/workspace/ml
       - ./data:/workspace/data
+      - ./services/event_simulator/scenarios:/workspace/scenarios:ro
       - hf_cache:/hf_cache   # Hugging Face downloads (DistilBERT, NER), shared with nlp_service
       - frames:/data/frames:ro   # vehicle-detector reference (frame brightness/contrast)
     depends_on:

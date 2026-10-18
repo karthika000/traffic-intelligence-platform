@@ -51,7 +51,32 @@ ml-monitor ── drift checks of every champion ──► drift.alerts ──�
 | `mlflow` | `ghcr.io/mlflow/mlflow:v2.17.2` + psycopg2 | Experiment tracking and model registry. Artifacts are kept in the `mlflow_artifacts` volume. |
 | `adminer` | `adminer:4.8.1` | Web SQL client for Postgres |
 
-All five have healthchecks. The 9 app services wait for `kafka` and `postgres` to report healthy before they start.
+All five have healthchecks, and so does every app service (see [Health and startup order](#health-and-startup-order)).
+
+### Health and startup order
+
+A container counts as healthy when it is doing its work, not when its process is up. Each service's main loops and Kafka consumers write heartbeats (`traffic_common.health`: a small JSON file per heartbeat under `/tmp/health`, written at most every 2 s), and the compose healthcheck runs `python -m traffic_common.health <heartbeats> --max-age 60`. The check fails when a heartbeat is missing, older than its maximum age, or comes from a consumer that owns no partitions (every `TypedConsumer` beats on each poll with the number of partitions assigned to it).
+
+| Service | Healthy when | Waits for (healthy) |
+| --- | --- | --- |
+| `migrate` | One-shot: `traffic_common.db upgrade` and `seed`, then exits | postgres |
+| `video_ingest` | A frame was published in the last minute | kafka, postgres, migrate (completed) |
+| `event_simulator` | Reports or sensor events went out in the last minute; its `simulator.control` consumer has partitions | kafka, postgres, migrate |
+| `cv_inference` | A frame was detected in the last minute; its `video.frames` consumer has partitions | + mlflow, video_ingest |
+| `nlp_service` | Its `reports.text` consumer is polling with partitions (after the classifier and NER have loaded) | + mlflow |
+| `anomaly_service` | The scoring loop completed in the last minute; its consumer has partitions | + mlflow |
+| `fusion_service` | The tick loop completed in the last minute; its consumer has partitions | + anomaly_service, nlp_service |
+| `summarizer` | The worker loop completed in the last minute; its `incidents` consumer has partitions | + mlflow, fusion_service |
+| `api` | `/ready`: Postgres and Kafka reachable, the live consumer polling with its partitions assigned | kafka, postgres, migrate |
+| `dashboard` | The Vite dev server answers | api |
+| `ml-monitor` | Its `drift.alerts` consumer has partitions; the scheduler loop beat in the last 30 min (it is silent while a check runs) | + mlflow, cv_inference |
+
+The order follows the data: fusion and the summarizer start from the latest offsets, so they join once their inputs are being produced. `start_period` is 10 minutes for the services that download weights on their first start (cv_inference, nlp_service, summarizer), so a slow first download doesn't count as a failure. To see why a container is unhealthy:
+
+```powershell
+docker inspect --format "{{json .State.Health}}" traffic-intel-fusion_service-1
+docker compose exec fusion_service python -m traffic_common.health tick consumer-fusion-service
+```
 
 Kafka has two listeners:
 
@@ -470,6 +495,17 @@ The fused confidence is stored as a per-component breakdown, in `incidents.confi
   - either a clearing report has arrived (`stage: cleared` from nlp_service, after which only `FUSION_CLEAR_MIN_SECONDS`, 20, must pass since the anomaly ended), or the incident hasn't been firing for `FUSION_QUIET_SECONDS` (300). Stray background reports don't keep it firing.
 - **System-wide degradation:** no vision-only incidents are created on the affected cameras. Existing incidents' vision evidence is marked degraded and down-weighted, and that change is published.
 
+### Start time
+
+An incident carries two times for its beginning:
+
+- **`start_time`:** when the incident of its type began: the first evidence that supports its type. That is a report of the same type, or a reliable traffic anomaly whose hints agree with the type at least `FUSION_CONFIRM_MIN_AGREEMENT` (a speed drop supports an accident, pedestrians in the road don't support road works). It is recomputed whenever the type changes, so a resolved incident's start belongs to its final type.
+  - **Only the run that fired counts:** walking back from the supporting evidence around the moment the incident was raised, a gap of more than `FUSION_START_GAP_SECONDS` (120) ends the run. Background reports arrive at about one per camera per type every 5 minutes, so a same-type report from minutes earlier doesn't become the start.
+  - **No supporting evidence yet:** the earliest evidence attached.
+- **`first_evidence_at`:** the earliest evidence attached at all. A new incident takes in the camera's reports from the last `FUSION_WINDOW_SECONDS` (600) whose type fits, so this can be a background congestion report from 9 minutes before the event.
+
+Before this split, `start_time` was the earliest attached evidence; on the running stack a broken-down-lorry run was dated 544 s before the scenario began. Migration `0013` copied the old values into `first_evidence_at`. The summarizer ("since 18:48 BST", the duration, and the pre-incident loop-speed baseline) and the dashboard (feed, incidents table, incident detail) use `start_time`. The incident detail also shows "First evidence" when it differs. Lists still sort by `suspected_at`, so a later start doesn't reorder the feed.
+
 ### Output and recovery
 
 - **Storage:** incidents and their `incident_evidence` links (anomalies, reports, metric windows, each with a weight and details) are stored in Postgres. A link whose target row isn't written yet is retried for up to 5 minutes.
@@ -531,7 +567,7 @@ docker compose run --rm ml-trainer python -m ml.evaluation.summarizer_eval
 
 The evaluation uses a reference set of 40 contexts: the stored incidents, topped up with contexts built from every phase of the scenario ground truth. Reference summaries are written from the same facts in a different style from the template (`ml/summarize/reference.py`).
 
-It always uses the same pinned reference set (`data/summarizer/reference_set.json`). It compares the template with flan-t5-small and flan-t5-base (prompt v1) and Qwen2.5-0.5B-Instruct (prompt v2). Qwen2.5-1.5B-Instruct is included only if its p95 latency on a five-context probe is under 10 s. The comparison covers:
+It always uses the same pinned reference set (`data/summarizer/reference_set.json`) when that file exists. On a fresh install, with no incidents and no completed scenario runs, the contexts are built from the scenario definitions instead, as if each scenario had run once on each camera (`--scenarios-dir`, mounted into `ml-trainer`), so `run_demo.ps1` can register a summarizer before anything has happened. It compares the template with flan-t5-small and flan-t5-base (prompt v1) and Qwen2.5-0.5B-Instruct (prompt v2). Qwen2.5-1.5B-Instruct is included only if its p95 latency on a five-context probe is under 10 s. The comparison covers:
 - ROUGE-L of the raw model output, and of what the service would publish after the guard;
 - the guard's pass rate and the fallback rate;
 - CPU latency with 2 threads.
@@ -583,7 +619,7 @@ docker compose run --rm ml-trainer python -m ml.monitoring.reference build vehic
 docker compose run --rm ml-trainer python -m ml.monitoring.reference show incident-text-classifier
 ```
 
-`ml-monitor` also builds a missing reference by itself the first time it checks a new champion (`DRIFT_AUTO_REFERENCE`).
+`ml-monitor` also builds a missing reference by itself the first time it checks a new champion (`DRIFT_AUTO_REFERENCE`). The vehicle-detector reference needs at least 3,000 detections in its window, about 2.5 minutes of the four cameras. On a fresh start the first check therefore fails and is retried at the next one, instead of saving a reference from a few seconds of output. `run_demo.ps1` builds it after 5 minutes of clean detections (`-ReferenceMinutes`).
 
 ### Drift checks
 
@@ -957,15 +993,17 @@ data/                local datasets and sample videos (git-ignored)
 models/              trained model artifacts (git-ignored, mounted read-only)
 tests/               repository-level tests (+ Dockerfile for the in-Docker test runner)
 infra/               MLflow image, Postgres init scripts
-scripts/             PowerShell helpers (up / down / logs / create_topics / test)
+scripts/             PowerShell helpers (run_demo / reset / e2e_test / up / down / logs /
+                     create_topics / test) and the setup and e2e Python scripts
 ruff.toml            lint settings for the whole repo
 ```
 
 ## Prerequisites (Windows)
 
-- Docker Desktop with the WSL 2 backend
-- Python 3.11 (for local development and tests; containers use `python:3.11-slim`)
-- Node.js 20+ (optional, only for running the dashboard outside Docker)
+- Docker Desktop with the WSL 2 backend, with at least 6 GB of memory for its VM (8 GB recommended) and about 20 GB of free disk
+- Git
+
+That is all the demo needs; everything else runs in containers. For local development: Python 3.11 (containers use `python:3.11-slim`), and optionally Node.js 20+ to run the dashboard outside Docker.
 
 If script execution is blocked, allow local scripts once for your user:
 
@@ -974,6 +1012,46 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
 ## Quick start
+
+1. Install the [prerequisites](#prerequisites-windows) and start Docker Desktop.
+2. Clone the repository.
+3. Run `scripts\run_demo.ps1`.
+
+```powershell
+git clone <repo-url> traffic-intelligence-platform
+cd traffic-intelligence-platform
+.\scripts\run_demo.ps1
+```
+
+When everything is up it opens the dashboard at <http://localhost:5173> and prints every URL. Add `-Scenario multi_vehicle_accident` to trigger a scenario once the services have warmed up.
+
+### What run_demo.ps1 does
+
+Every step skips what already exists, so a re-run takes under a minute (53 s here). `-Retrain` retrains the models anyway.
+
+| Stage | Measured from a clean state |
+| --- | --- |
+| Prerequisites: Docker running, Compose 2.24+, VM memory (`-MinMemoryGB`, 6), CPUs, disk, and every host port free (or already ours) and outside the Windows-reserved ranges. Each problem is printed with its fix. | 7 s |
+| `.env` from `.env.example` if missing | 0 s |
+| Build images (from cache here; a first build on a new machine takes much longer) | 10 s |
+| Infrastructure up and healthy; Kafka topics | 14 s + 37 s |
+| Migrations and the demo cameras (the `migrate` service) | 4 s |
+| Sample videos and zone configs (in the video_ingest image, no host Python). Rate limiting and network errors are retried; a camera still without a video gets a generated one, and the stage says so. | 18 s |
+| NLP dataset, if missing | 2 s |
+| Models without a `@champion`: register `vehicle-detector`; train `congestion-classifier`, `traffic-anomaly-detector`, `incident-text-classifier` (DistilBERT; `-QuickModels` for the TF-IDF baseline) and `incident-summarizer` (template against flan-t5-small) | 6 s, 34 s, 26 s, 9 min 46 s, 1 min 2 s |
+| Drift references of the trained models, if missing (training already saves them) | 0 s |
+| Every service up, each followed until healthy (`-ServiceTimeoutMinutes`, 25; prints the logs of a service that fails) | 58 s |
+| Pipeline output: live metrics from every camera, analysed reports | 0 s |
+| Open the dashboard (`-NoBrowser` skips it) | 0 s |
+| `vehicle-detector` drift reference, after `-ReferenceMinutes` (5) of clean detections | 5 min 12 s |
+| `-Scenario`: trigger it on `-ScenarioCamera` at `-TimeScale` (6) after `-WarmupMinutes` (10; the anomaly detector compares each camera with its own last ~10 minutes) | – |
+| **Total** (Core Ultra 5 225H, 14 vCPUs, 7.5 GB VM, images cached) | **19 min 37 s** |
+
+To start again from nothing, run `.\scripts\reset.ps1`. After you confirm, it deletes the containers, every volume (Kafka, Postgres with MLflow's runs and registry, MLflow artifacts, frames, model caches, drift reports) and the generated contents of `data/` and `models/`. Its options: `-KeepVideos` keeps the downloaded videos, `-IncludeEnv` also deletes `.env`, `-Images` also removes the built images, and `-Force` skips the prompt.
+
+To check the whole pipeline, run `.\scripts\e2e_test.ps1` (see [End-to-end test](#end-to-end-test)).
+
+### Other scripts
 
 ```powershell
 .\scripts\up.ps1                         # creates .env if missing, builds, starts everything, creates topics
@@ -986,6 +1064,9 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 | Script | Options |
 | --- | --- |
+| `run_demo.ps1` | `-Scenario name` · `-ScenarioCamera id` · `-TimeScale N` · `-WarmupMinutes N` · `-Retrain` · `-QuickModels` · `-ReferenceMinutes N` · `-ServiceTimeoutMinutes N` · `-MinMemoryGB N` · `-NoBrowser` · `-NoBuild` |
+| `reset.ps1` | `-Force` · `-KeepVideos` · `-IncludeEnv` · `-Images` |
+| `e2e_test.ps1` | `-TimeScale N` · `-TimeoutMinutes N` · `-Scenarios a,b` |
 | `up.ps1` | `-Services a,b` · `-NoBuild` · `-Attach` |
 | `down.ps1` | `-Volumes` |
 | `logs.ps1` | `-Services a,b` · `-Tail N` · `-NoFollow` |
@@ -1010,7 +1091,7 @@ pip install -e "shared[dev]" -r services\video_ingest\requirements.txt -r servic
 
 ### Database migrations
 
-Run these with the stack up. They use `POSTGRES_URL`, which defaults to `localhost:5432`:
+The one-shot `migrate` service applies every migration and seeds the demo cameras on each `docker compose up`, before any app service starts. The commands below are for development. Run them with the stack up. They use `POSTGRES_URL`, which defaults to `localhost:5432`:
 
 ```powershell
 python -m traffic_common.db upgrade                            # apply all migrations
@@ -1034,7 +1115,8 @@ ruff check .
 | File | Needs | What it covers |
 | --- | --- | --- |
 | `test_schemas.py` | nothing | Schema round-trips, validation rules, and the topic lists in `create_topics.ps1` |
-| `test_messaging.py` | Kafka | Producer validation and keys, consumer commits, retries, dead-lettering, shutdown |
+| `test_messaging.py` | Kafka | Producer validation and keys, consumer commits, retries, dead-lettering, shutdown, the consumer heartbeat with its partition count |
+| `test_health.py` | nothing | Heartbeat files (throttling, state changes), the healthcheck CLI: missing, stale, per-heartbeat max age, consumers without partitions |
 | `test_migrations.py` | Postgres | Upgrade, downgrade and upgrade again; models match the migration; constraints; idempotent seed |
 | `test_skeleton.py` | nothing | Settings, logging, lifecycle, service layout |
 | `test_video_ingest.py` | nothing | Frame sampling, resizing, JPEG encoding, stream_url parsing, file naming, retention, health metrics |
@@ -1064,6 +1146,33 @@ Those messages stay until Kafka retention removes them.
 On Windows, Smart App Control can block confluent-kafka's native library, so `import confluent_kafka` fails and the Kafka tests skip under `-Local`. The cv_inference integration test also skips under `-Local`, because PyTorch and Ultralytics are only installed in the Docker images. The default `test.ps1` mode runs in Linux and runs everything.
 
 Run one service outside Docker: `python services\api\main.py`. Outside Docker, `traffic_common.get_settings()` defaults to the host-side addresses (`localhost:9092`, Postgres on `localhost:5432`, MLflow on `http://localhost:5000`), so a local process talks to the infrastructure running in Docker.
+
+### End-to-end test
+
+```powershell
+.\scripts\e2e_test.ps1                       # all 4 scenarios at x6, timeout 30 min
+.\scripts\e2e_test.ps1 -Scenarios flooding -TimeScale 10
+```
+
+With the stack running and every service healthy, it triggers each scenario on a different camera at once. It then follows each run, through the API only, until the run's incident resolves. The run's incident is the one whose evidence includes reports carrying the run's `scenario_id`. That incident can have been opened before the trigger: fusion attaches a run's reports to an incident already open on the camera. Before triggering, the test waits up to 10 minutes (`--wait-free-minutes`) for cameras without an open incident.
+
+A run passes when its incident was **confirmed**, has the scenario's **type**, has at least one **summary**, is listed and returned by the **API**, and **resolved**. The checker (`scripts/e2e_check.py`) uses only the standard library and runs in the api image, so the host needs no Python. It prints a table with timings from the trigger, writes `data/e2e/<time>.json`, and exits 1 on any failure.
+
+Directly after a clean `run_demo.ps1` (2026-10-18; at `x6` the scenarios, 16 to 22 minutes long, run in 2.7 to 3.7):
+
+| Scenario | Camera | Type | Suspected | Confirmed | First summary | Resolved | Start vs run | First evidence vs run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| broken_down_lorry | Elephant & Castle | breakdown | 22 s | 36 s | 47 s | 2 min 40 s | +1 s | −407 s |
+| flooding | Hyde Park Corner | weather_hazard | 39 s | 39 s | 49 s | 14 min 39 s | +25 s | −822 s |
+| multi_vehicle_accident | Old Street | accident | 10 s | 23 s | 20 s | 3 min 13 s | +3 s | −549 s |
+| road_works | Trafalgar Square | road_works | 54 s | 54 s | 1 min 4 s | 2 min 42 s | +33 s | −28 s |
+
+Times are from the trigger. All four passed. The test took 24.8 minutes in all, including the 10 minutes it waited for a false incident on Elephant & Castle (parked vans; see [Model limitations](#model-limitations)) before triggering anyway. The lorry run there still got its own `breakdown` incident.
+
+- **Start times:** the last two columns show why [the start time](#start-time) changed. The earliest attached evidence, which was the old `start_time`, came up to 14 minutes before the run. `start_time` is within about 30 seconds of it.
+- **Flooding resolved late:** an anomaly on Hyde Park Corner that started during the run stayed active (anomaly_service's hold rule), and fusion doesn't resolve while a traffic anomaly is active. In the run before this one, flooding resolved after 3 min 14 s.
+
+**Right after a start, the test can see false incidents.** In the first minutes the anomaly detector has almost no history per camera. On the first attempt, an anomaly 50 s after startup and a single background report confirmed an incident on Trafalgar Square, and the road works run then joined it (correctly typed `road_works` in the end). That is why the test waits for free cameras, and why `run_demo.ps1 -Scenario` waits `-WarmupMinutes` (10).
 
 ## Configuration
 

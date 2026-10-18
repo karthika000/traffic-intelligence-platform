@@ -4,6 +4,10 @@
 2. it doesn't                 -> download the pretrained Ultralytics weights, log them as a
                                  run, register a new version and point the alias at it.
 3. MLflow unreachable         -> use the pretrained weights directly (version "local").
+
+The service does this at startup; to register ahead of time (scripts/run_demo.ps1 does):
+
+    docker compose run --rm cv_inference python -m cv_inference.registry
 """
 
 import logging
@@ -133,3 +137,29 @@ def _local_fallback(model: str, name: str, weights_dir: Path, exc: Exception) ->
 def record_model_version(engine: Engine, model: ResolvedModel, metrics: dict[str, Any]) -> None:
     """Record the model in use in model_versions (see traffic_common.db.registry)."""
     _record(engine, model.name, model.version, mlflow_run_id=model.run_id, metrics=metrics)
+
+
+def main() -> int:
+    """Resolve the configured detector, registering the pretrained weights if the alias is
+    missing. Fails if MLflow can't be reached, rather than falling back to local weights."""
+    from cv_inference.config import CvConfig
+    from traffic_common import get_logger, get_settings
+
+    settings = get_settings("cv_inference")
+    get_logger("cv_inference", settings.log_level)
+    cfg = CvConfig.from_env()
+    m = resolve_model(
+        settings.mlflow_tracking_uri,
+        cfg.registry_model_name,
+        cfg.registry_alias,
+        cfg.model,
+        cfg.imgsz,
+        cfg.classes,
+        cfg.weights_dir,
+    )
+    print(f"{m.name}@{cfg.registry_alias}: version {m.version} ({m.source})")
+    return 1 if m.source == "local-fallback" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

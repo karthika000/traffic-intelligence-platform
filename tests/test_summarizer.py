@@ -489,3 +489,36 @@ def test_debounce_summarises_only_the_latest_version() -> None:
     other = uuid.UUID(int=2)
     svc.offer(incident(1, iid=other))  # incidents are debounced independently
     assert len(svc.pending) == 2
+
+
+def test_reference_set_from_definitions_on_a_fresh_install() -> None:
+    """No incidents or completed scenario runs yet: the evaluation still has contexts (and the
+    demo can register a summarizer), one per phase of every scenario on every camera."""
+    from types import SimpleNamespace
+
+    import yaml
+
+    from ml.evaluation.summarizer_eval import _seconds, definition_contexts
+
+    cameras = [
+        SimpleNamespace(id="cam-old-street", name="Old Street", location_name="Old Street, EC1V"),
+        SimpleNamespace(id="cam-hyde-park-corner", name="Hyde Park Corner", location_name="W1J"),
+    ]
+
+    class Conn:
+        def execute(self, _query):
+            return SimpleNamespace(all=lambda: cameras)
+
+    scenarios = ROOT / "services" / "event_simulator" / "scenarios"
+    ctxs = definition_contexts(Conn(), scenarios)
+    phases = sum(
+        len(yaml.safe_load(p.read_text(encoding="utf-8"))["phases"])
+        for p in scenarios.glob("*.yaml")
+    )
+    assert len(ctxs) == phases * len(cameras)
+    assert {c.camera_id for c in ctxs} == {c.id for c in cameras}
+    assert ctxs == definition_contexts(Conn(), scenarios)  # the same set every time
+    first = [c for c in ctxs if c.incident_id.endswith(":first_reports")][0]
+    assert first.status == "suspected" and first.incident_type == "accident"
+    assert all(c.reference_time > c.start_time for c in ctxs)
+    assert (_seconds("2m"), _seconds("30s"), _seconds(45)) == (120, 30, 45)
