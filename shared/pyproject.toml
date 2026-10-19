@@ -14,12 +14,14 @@ dependencies = [
     "sqlalchemy>=2.0.30,<2.1",
     "psycopg[binary]>=3.2,<4",
     "alembic>=1.13,<2",
+    "prometheus-client>=0.21,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 [tool.setuptools.packages.find]
@@ -28,3 +30,13 @@ where = ["src"]
 [tool.setuptools.package-data]
 # Alembic migration template and revisions ship inside the package so migrations run from the images.
 traffic_common = ["db/migrations/script.py.mako", "db/migrations/versions/*.py"]
+
+[tool.mypy]
+# CI: cd shared && mypy (no baseline: the package checks clean).
+python_version = "3.11"
+mypy_path = "src"
+packages = ["traffic_common"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+plugins = ["pydantic.mypy"]

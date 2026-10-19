@@ -50,6 +50,12 @@ class FusionConfig:
     clear_min_seconds: float = 20.0  # with a clearing report: wait this long after the anomaly
     near_baseline_ratio: float = 0.8  # recent camera speed >= ratio x baseline = back to normal
     metrics_recent_seconds: float = 60.0
+    # A camera's anomalies can create an incident on their own only once it has had this long
+    # of uninterrupted metrics (gaps under metrics_gap_seconds), the same warm-up anomaly_service
+    # applies before alerting, so a camera that just came online can't raise vision-only
+    # incidents. Restarts reload the recent metrics from Postgres.
+    vision_warmup_seconds: float = 600.0
+    metrics_gap_seconds: float = 60.0
     min_severity_reports: int = 2
     publish_confidence_delta: float = 0.1  # republish when confidence moves this much
     # --- loop

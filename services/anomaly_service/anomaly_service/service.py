@@ -1,5 +1,6 @@
 """Consume traffic.metrics and events.raw, score every few seconds, publish anomaly episodes."""
 
+import copy
 import json
 import logging
 import math
@@ -9,10 +10,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
-from sqlalchemy import Engine, update
+from prometheus_client import Counter, Gauge
+from sqlalchemy import Engine, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
+from anomaly_service.calibration import CameraSettings, calibrate_camera, python_model
 from anomaly_service.config import AnomalyConfig
 from anomaly_service.models import LoadedModel, ModelManager
 from anomaly_service.state import (
@@ -25,9 +28,10 @@ from anomaly_service.state import (
 from ml.alarm import AlarmEvent, AlarmTracker
 from ml.features import SEQUENCE_LENGTH, WINDOW_S, current_baselines
 from traffic_common.db.models import Anomaly as AnomalyRow
-from traffic_common.db.models import CameraCongestion, CongestionHistory, SensorReading
+from traffic_common.db.models import Camera, CameraCongestion, CongestionHistory, SensorReading
 from traffic_common.db.registry import record_model_version
 from traffic_common.schemas import Anomaly, KafkaMessage, RawEvent, TrafficMetrics
+from traffic_common.telemetry import INFERENCE_SECONDS, SERVICE_ERRORS, timed
 from traffic_common.topics import Topic
 
 log = logging.getLogger(__name__)
@@ -39,6 +43,23 @@ SYSTEM_MODEL = ("system-health-rules", "1")
 # tiny (cv_inference almost always processes the same number of frames per window), so a
 # one-frame wobble can top the score; they only count when the health check sees a real drop.
 HEALTH_FEATURES = {"frames_rel", "mean_confidence", "camera_speed_present"}
+# Hints about traffic (not equipment): alerts with one of these can end by recovery.
+TRAFFIC_HINTS = {"speed_drop", "stopped_vehicles", "pedestrian_in_road"}
+
+ANOMALIES_ACTIVE = Gauge(
+    "traffic_anomalies_active",
+    "Active alerts: 1 per camera with one, plus the system scope",
+    ["scope"],
+)
+CAMERAS_WARMING = Gauge(
+    "traffic_cameras_warming_up",
+    "Cameras that can't raise traffic alerts yet: in their warm-up, or without recent metrics",
+)
+ANOMALY_EVENTS = Counter(
+    "traffic_anomaly_events_total",
+    "Published anomaly events (start, update, end)",
+    ["scope", "event"],
+)
 
 
 @dataclass
@@ -47,9 +68,11 @@ class Stats:
     stale_metrics: int = 0
     sensor_stored: int = 0
     scored: int = 0
+    warming: int = 0  # checks of cameras still warming up (no alerts)
     started: int = 0
     updated: int = 0
     ended: int = 0
+    recovered: int = 0  # of those, ended because the traffic metrics recovered
     health_noise: int = 0  # checks over threshold only through healthy pipeline features
     db_errors: int = 0
 
@@ -70,6 +93,8 @@ class AnomalyService:
         self._db_warned: set[str] = set()
         self.stats = Stats()
         self.system: SystemEpisode | None = None  # active system-wide degradation
+        self.settings: dict[str, CameraSettings] = {}  # from cameras.zone_config["anomaly"]
+        self._pristine: dict[str, object] = {}  # model label -> its calibration as loaded
 
     # ------------------------------------------------------------------ ingestion
 
@@ -84,6 +109,7 @@ class AnomalyService:
                     self.cfg.min_consecutive,
                 )
                 state = CameraState(camera_id, self.cfg.history_windows, tracker)
+                state.settings = self.settings.get(camera_id, CameraSettings())
                 self.cameras[camera_id] = state
             return state
 
@@ -110,7 +136,36 @@ class AnomalyService:
             return
         state = self.camera(m.camera_id)
         with state.lock:
+            latest = state.latest_ts
+            gap = (m.window_end - latest).total_seconds() if latest is not None else 0.0
+            if self.cfg.warmup_seconds > 0 and gap > self.cfg.warmup_seconds:
+                log.info(
+                    "camera %s: no metrics for %s; warming up again",
+                    m.camera_id,
+                    m.window_end - latest,
+                )
+                state.restart_warmup(m.window_end)
             state.add_metrics(m)
+
+    def refresh_settings(self) -> None:
+        """Re-read per-camera anomaly settings (cameras.zone_config["anomaly"]); a camera whose
+        settings changed is recalibrated at its next check."""
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(select(Camera.id, Camera.zone_config)).all()
+        except Exception as exc:
+            log.warning("could not read camera settings: %s", exc)
+            return
+        settings = {r.id: CameraSettings.from_zone_config(r.zone_config) for r in rows}
+        for camera_id, new in settings.items():
+            if self.settings.get(camera_id) != new and new != CameraSettings():
+                log.info("camera %s: anomaly settings %s", camera_id, new)
+        self.settings = settings
+        with self._lock:
+            states = list(self.cameras.values())
+        for state in states:
+            with state.lock:
+                state.settings = settings.get(state.camera_id, CameraSettings())
 
     def _store_sensor(self, event: RawEvent) -> None:
         p = event.payload
@@ -137,6 +192,7 @@ class AnomalyService:
             self._warn_once(event.camera_id, "sensor reading for a camera not in the cameras table")
         except Exception as exc:
             self.stats.db_errors += 1
+            SERVICE_ERRORS.labels("database").inc()
             log.error("could not store sensor reading: %s", exc)
 
     # ------------------------------------------------------------------ scoring
@@ -166,7 +222,30 @@ class AnomalyService:
             try:
                 self._score_camera(state, frame, congestion, anomaly)
             except Exception:
+                SERVICE_ERRORS.labels("scoring").inc()
                 log.exception("camera %s: scoring failed", state.camera_id)
+        ANOMALIES_ACTIVE.labels("camera").set(sum(s.active is not None for s in states))
+        ANOMALIES_ACTIVE.labels("system").set(int(self.system is not None))
+        CAMERAS_WARMING.set(len(self.warming_up(states)))
+
+    def warming_up(self, states: list[CameraState]) -> list[str]:
+        """Cameras of the cameras table that can't raise traffic alerts yet: still in their
+        warm-up, or without recent metrics (not started, or the feed paused). Cameras that only
+        exist in a test's database are left out."""
+        now = datetime.now(UTC)
+        fresh_s = 2 * self.cfg.max_metric_age_seconds
+        by_id = {s.camera_id: s for s in states}
+        out = []
+        for camera_id in self.settings:
+            s = by_id.get(camera_id)
+            recent = (
+                s is not None
+                and s.latest_ts is not None
+                and (now - s.latest_ts).total_seconds() <= fresh_s
+            )
+            if s is None or not s.warm or not recent:
+                out.append(camera_id)
+        return sorted(out)
 
     # ------------------------------------------------------------------ system degradation
 
@@ -299,7 +378,7 @@ class AnomalyService:
             details=details,
         )
         self.send(Topic.ANOMALIES, message)
-        self._count(event)
+        self._count(event, "system")
         log.warning(
             "ANOMALY %-6s scope=system type=camera_degraded severity=%s cameras=%s metric=%s "
             "linked=%s suppressed_checks=%d age=%.0fs id=%s",
@@ -314,7 +393,8 @@ class AnomalyService:
         )
         self._store_anomaly(message)
 
-    def _count(self, event: AlarmEvent) -> None:
+    def _count(self, event: AlarmEvent, scope: str = "camera") -> None:
+        ANOMALY_EVENTS.labels(scope, event.value).inc()
         if event is AlarmEvent.START:
             self.stats.started += 1
         elif event is AlarmEvent.END:
@@ -326,7 +406,8 @@ class AnomalyService:
         self, state: CameraState, frame, congestion: LoadedModel, anomaly: LoadedModel
     ):
         ts = frame["ts"].iloc[-1]
-        level_row = congestion.predictor.predict(frame).iloc[-1]
+        with timed(INFERENCE_SECONDS, model=congestion.name):
+            level_row = congestion.predictor.predict(frame).iloc[-1]
         level = str(level_row["level"])
         confidence = _float(level_row.get("confidence"))
         ts0 = frame["ts"].iloc[-1]
@@ -345,7 +426,9 @@ class AnomalyService:
             )
             state.frozen_baseline = None
             state.active.baseline_released = True
-        result = anomaly.predictor.predict(state.model_input(frame)).iloc[-1].copy()
+        ready = self._warmed_up(state, frame, anomaly, ts)
+        with timed(INFERENCE_SECONDS, model=anomaly.name):
+            result = anomaly.predictor.predict(state.model_input(frame)).iloc[-1].copy()
         self.stats.scored += 1
         valid = bool(result.get("valid", True))
         score, threshold = _float(result["score"]), _float(result["threshold"])
@@ -357,6 +440,11 @@ class AnomalyService:
             state.camera_id, level, confidence, score if valid else None, threshold, versions, ts
         )
         if not valid or score is None or threshold is None:
+            return
+        if not ready:
+            # The baselines aren't full yet: the camera is compared with a few minutes at best.
+            self.stats.warming += 1
+            state.tracker.suppress()
             return
         if self.system is not None and state.active is None:
             # A pipeline-wide degradation explains high scores now: no new traffic alerts.
@@ -394,12 +482,38 @@ class AnomalyService:
             a.hold_reasons = hold_reasons
             before_rank, before_hints = SEVERITY_ORDER.index(a.severity), set(a.seen_hints)
             self._refresh_active(a, result, state.tracker.peak_score, threshold)
+            if self._recovered(state, frame):
+                a.recovered_since = a.recovered_since or ts
+            else:
+                a.recovered_since = None
+            if (
+                a.recovered_since is not None
+                and (ts - a.recovered_since).total_seconds() >= self.cfg.recovery_seconds
+            ):
+                # Traffic is back to normal even if the score hasn't cleared (a frozen baseline
+                # can keep it up): end the alert, with the usual cooldown.
+                a.hold_reasons = []
+                self.stats.recovered += 1
+                self._publish(
+                    state,
+                    AlarmEvent.END,
+                    state.tracker.peak_score,
+                    threshold,
+                    anomaly,
+                    versions,
+                    ts,
+                    extra={"closed_by": "recovered"},
+                )
+                state.tracker.close(ts.timestamp())
+                state.active, state.frozen_baseline = None, None
+                return
             escalated = SEVERITY_ORDER.index(a.severity) > before_rank
             new_hints = set(a.seen_hints) - before_hints
+            recovery_changed = a.recovered_since != a.published_recovered
             due = a.last_published is None or (ts - a.last_published).total_seconds() >= (
                 self.cfg.update_min_interval_seconds
             )
-            if (escalated or new_hints) and due:
+            if (escalated or new_hints or recovery_changed) and due:
                 a.updates += 1
                 self._publish(
                     state,
@@ -410,6 +524,88 @@ class AnomalyService:
                     versions,
                     ts,
                 )
+
+    def _warmed_up(self, state: CameraState, frame, anomaly: LoadedModel, ts) -> bool:
+        """Whether the camera may raise traffic alerts: it has had ``warmup_seconds`` of
+        metrics and is calibrated for the current model and its settings. Calibrates at the
+        end of the warm-up, and again after a model reload or a settings change."""
+        if not state.warm:
+            start = state.warmup_from or ts
+            if (ts - start).total_seconds() < self.cfg.warmup_seconds:
+                return False
+        key = f"{anomaly.label}|{state.settings}"
+        if state.calibrated_for != key:
+            if not self._calibrate(state, frame, anomaly):
+                return False  # too little history to calibrate yet: keep warming up
+            state.calibrated_for = key
+        if not state.warm:
+            state.warm = True
+            calibration = state.calibration.describe() if state.calibration else "no calibration"
+            log.info(
+                "camera %s: warm-up complete after %.0fs; %s",
+                state.camera_id,
+                (ts - (state.warmup_from or ts)).total_seconds(),
+                calibration,
+            )
+        return True
+
+    def _calibrate(self, state: CameraState, frame, anomaly: LoadedModel) -> bool:
+        py = python_model(anomaly.predictor)
+        if py is None:  # the rule-based fallback has nothing to calibrate
+            state.calibration = None
+            return True
+        pristine = self._pristine.get(anomaly.label)
+        if pristine is None:  # first calibration with this model: keep its own calibration
+            pristine = self._pristine[anomaly.label] = copy.deepcopy(py.calibration)
+        result = calibrate_camera(
+            py,
+            pristine,
+            state.camera_id,
+            frame,
+            state.settings,
+            min_sequences=self.cfg.calibration_min_sequences,
+        )
+        if result is None:
+            return False
+        if state.warm:  # a recalibration: the model was reloaded or the settings changed
+            log.info(
+                "camera %s: recalibrated for %s: %s",
+                state.camera_id,
+                anomaly.label,
+                result.describe(),
+            )
+        state.calibration = result
+        return True
+
+    def _recovered(self, state: CameraState, frame) -> bool:
+        """Whether an active traffic alert's metrics are back to normal: loop and camera speed
+        (the last 3 windows) at least ``recovery_ratio`` x the frozen baseline, and stopped
+        vehicles and pedestrians within ``hold_stopped_margin`` of it. Signals the camera
+        ignores, or without data, aren't judged; at least one speed must be."""
+        a, frozen = state.active, state.frozen_baseline
+        if a is None or frozen is None or not (a.seen_hints & TRAFFIC_HINTS):
+            return False
+        recent = frame.tail(3)
+        judged = 0
+        for col, signal in (("loop_speed_kmh", None), ("avg_speed_kmh", "camera_speed")):
+            if signal and state.settings.ignores(signal):
+                continue
+            now, base = recent[col].astype(float).mean(), frozen.get(col)
+            if not base or pd.isna(now):
+                continue
+            judged += 1
+            if now < self.cfg.recovery_ratio * base:
+                return False
+        for col, signal in (
+            ("stopped_vehicles", "stopped_vehicles"),
+            ("pedestrians_in_roadway", "pedestrians"),
+        ):
+            now, base = recent[col].astype(float).mean(), frozen.get(col)
+            if state.settings.ignores(signal) or base is None or pd.isna(now):
+                continue
+            if now > base + self.cfg.hold_stopped_margin:
+                return False
+        return judged > 0
 
     def _vet_health(self, state: CameraState, result, score: float, threshold: float) -> float:
         """Hold the model's camera_degraded explanation to the health check (frames or
@@ -479,6 +675,8 @@ class AnomalyService:
         recent = frame.tail(3)
         reasons = []
         for col, name in (("loop_speed_kmh", "loop_speed"), ("avg_speed_kmh", "camera_speed")):
+            if state.settings.ignores(name):
+                continue
             now, base = recent[col].astype(float).mean(), frozen.get(col)
             if base and pd.notna(now) and now < self.cfg.hold_speed_ratio * base:
                 reasons.append(f"{name}_below_{self.cfg.hold_speed_ratio:g}x_baseline")
@@ -486,7 +684,12 @@ class AnomalyService:
             recent["stopped_vehicles"].astype(float).mean(),
             frozen.get("stopped_vehicles"),
         )
-        if base is not None and pd.notna(stopped) and stopped > base + self.cfg.hold_stopped_margin:
+        if (
+            not state.settings.ignores("stopped_vehicles")
+            and base is not None
+            and pd.notna(stopped)
+            and stopped > base + self.cfg.hold_stopped_margin
+        ):
             reasons.append("stopped_vehicles_above_baseline")
         return reasons
 
@@ -507,6 +710,10 @@ class AnomalyService:
         }
         if a.hold_reasons:
             details["hold"] = a.hold_reasons
+        if event is not AlarmEvent.START:
+            recovered = a.recovered_since
+            details["recovered_since"] = recovered.isoformat() if recovered else None
+            a.published_recovered = recovered
         if event is not AlarmEvent.UPDATE:
             details["frozen_baseline"] = {
                 k: round(v, 3) for k, v in (state.frozen_baseline or {}).items() if v is not None
@@ -615,6 +822,7 @@ class AnomalyService:
             self._warn_once(m.camera_id, "anomaly for a camera not in the cameras table")
         except Exception as exc:
             self.stats.db_errors += 1
+            SERVICE_ERRORS.labels("database").inc()
             log.error("could not store anomaly %s: %s", m.anomaly_id, exc)
 
     def _upsert_congestion(self, camera_id, level, confidence, score, threshold, versions, ts):
@@ -659,6 +867,7 @@ class AnomalyService:
             self._warn_once(camera_id, "congestion for a camera not in the cameras table")
         except Exception as exc:
             self.stats.db_errors += 1
+            SERVICE_ERRORS.labels("database").inc()
             log.error("could not store congestion for %s: %s", camera_id, exc)
 
     def _warn_once(self, camera_id: str | None, what: str) -> None:
@@ -750,11 +959,13 @@ class AnomalyService:
                 if s.congestion_level
             }
             active = [cid for cid, s in self.cameras.items() if s.active]
+            warming = self.warming_up(list(self.cameras.values()))
         log.info(
-            "stats %s congestion=%s active_anomalies=%s system=%s models=%s",
+            "stats %s congestion=%s active_anomalies=%s warming_up=%s system=%s models=%s",
             self.stats.reset(),
             levels,
             active or "none",
+            warming or "none",
             sorted(self.system.cameras) if self.system else "ok",
             {r: self.models.get(r).label for r in ("congestion", "anomaly")},
         )

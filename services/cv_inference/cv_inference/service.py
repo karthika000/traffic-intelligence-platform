@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+from prometheus_client import Counter, Histogram
 from sqlalchemy import Engine, insert, select
 from sqlalchemy.exc import IntegrityError
 
@@ -28,10 +29,22 @@ from traffic_common.db.models import Camera, TrafficMetric
 from traffic_common.health import heartbeat
 from traffic_common.messaging import TypedConsumer, TypedProducer
 from traffic_common.schemas import FrameMessage, TrafficMetrics
+from traffic_common.telemetry import INFERENCE_SECONDS
 from traffic_common.topics import ConsumerGroup, Topic
 
 log = logging.getLogger(__name__)
 _JOIN_TIMEOUT = 15.0
+FRAMES = Counter(
+    "traffic_cv_frames_total",
+    "Frames by outcome: processed, stale, superseded, missing (file gone), error",
+    ["camera", "outcome"],
+)
+FRAME_LAG_SECONDS = Histogram(
+    "traffic_cv_frame_lag_seconds",
+    "Capture to published detection, per processed frame",
+    ["camera"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 10),
+)
 
 
 class CvService:
@@ -239,9 +252,11 @@ class CvService:
         ctx = self.context(frame.camera_id)
         if frame_age_seconds(frame) > self.cfg.max_frame_age_seconds:
             ctx.stats.stale += 1
+            FRAMES.labels(frame.camera_id, "stale").inc()
             return
         if self.slots.put(frame) is not None:
             ctx.stats.superseded += 1
+            FRAMES.labels(frame.camera_id, "superseded").inc()
 
     def _worker(self, detector: Detector) -> None:
         while not self.stop.is_set():
@@ -253,6 +268,7 @@ class CvService:
                 self._process(ctx, frame, detector)
             except Exception:
                 ctx.stats.errors += 1
+                FRAMES.labels(frame.camera_id, "error").inc()
                 log.exception("camera %s: frame %s failed", frame.camera_id, frame.frame_id)
             finally:
                 self.slots.done(frame.camera_id)
@@ -260,11 +276,13 @@ class CvService:
     def _process(self, ctx: CameraContext, frame: FrameMessage, detector: Detector) -> None:
         if frame_age_seconds(frame) > self.cfg.max_frame_age_seconds:  # went stale while waiting
             ctx.stats.stale += 1
+            FRAMES.labels(frame.camera_id, "stale").inc()
             return
         image = read_frame(frame.frame_path)
         if image is None:
             log.debug("camera %s: %s already deleted, skipping", frame.camera_id, frame.frame_path)
             ctx.stats.missing += 1
+            FRAMES.labels(frame.camera_id, "missing").inc()
             return
         assert self.model is not None and self.producer is not None
         with ctx.lock:
@@ -279,8 +297,14 @@ class CvService:
             )
         self.producer.send(Topic.DETECTIONS, result.detection)
         heartbeat("inference").beat()  # healthcheck: frames are being processed
-        ctx.stats.lag_ms.append(frame_age_seconds(frame) * 1000)
+        lag = frame_age_seconds(frame)
+        ctx.stats.lag_ms.append(lag * 1000)
         ctx.stats.processed += 1
+        FRAMES.labels(frame.camera_id, "processed").inc()
+        FRAME_LAG_SECONDS.labels(frame.camera_id).observe(lag)
+        INFERENCE_SECONDS.labels(self.model.name).observe(
+            (result.detection.inference_ms or 0) / 1000
+        )
         if result.metrics is not None:
             self.publish_metrics(result.metrics)
         if self.cfg.annotate:

@@ -30,6 +30,9 @@ class AnomalyEvidence:
     active: bool = True
     ended_at: datetime | None = None
     degraded: bool = False  # observed during a system-wide degradation
+    # anomaly_service: since when the traffic metrics have been back near the frozen baseline
+    # while the alert is still active (None while they aren't)
+    recovered_since: datetime | None = None
 
     @property
     def traffic(self) -> bool:
@@ -37,14 +40,14 @@ class AnomalyEvidence:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        for k in ("started_at", "last_seen", "ended_at"):
+        for k in ("started_at", "last_seen", "ended_at", "recovered_since"):
             d[k] = _iso(d[k])
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "AnomalyEvidence":
         d = dict(d)
-        for k in ("started_at", "last_seen", "ended_at"):
+        for k in ("started_at", "last_seen", "ended_at", "recovered_since"):
             d[k] = _ts(d.get(k))
         return cls(**d)
 
@@ -124,10 +127,14 @@ class FusedIncident:
         return any(a.degraded for a in self.anomalies.values() if a.traffic)
 
     @property
-    def active_anomaly(self) -> bool:
-        """A reliable traffic anomaly is still active. Degraded ones (seen during a system
+    def active_anomalies(self) -> list[AnomalyEvidence]:
+        """Reliable traffic anomalies still active. Degraded ones (seen during a system
         degradation, or on a camera reporting itself degraded) can't hold an incident open."""
-        return any(a.active for a in self.anomalies.values() if a.traffic and not a.degraded)
+        return [a for a in self.anomalies.values() if a.active and a.traffic and not a.degraded]
+
+    @property
+    def active_anomaly(self) -> bool:
+        return bool(self.active_anomalies)
 
     def places(self) -> set[str]:
         return {p for r in self.reports.values() for p in r.places}

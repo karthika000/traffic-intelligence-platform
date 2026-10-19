@@ -41,6 +41,7 @@ def serve(config: MonitorConfig) -> None:
     from traffic_common.db import create_db_engine
     from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
     from traffic_common.messaging import TypedConsumer, TypedProducer
+    from traffic_common.telemetry import serve_metrics
     from traffic_common.topics import ConsumerGroup, Topic
 
     log = get_logger(SERVICE_NAME, os.getenv("LOG_LEVEL", "INFO"))
@@ -48,6 +49,7 @@ def serve(config: MonitorConfig) -> None:
     get_logger("traffic_common", os.getenv("LOG_LEVEL", "INFO"))
     settings = _setup(config)
     install_signal_handlers(log)
+    serve_metrics()
     stop = shutdown_event()
     log.info("starting: %s", config)
 

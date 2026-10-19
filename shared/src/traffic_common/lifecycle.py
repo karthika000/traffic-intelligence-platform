@@ -1,8 +1,8 @@
 """Process lifecycle: one process-wide shutdown event, signal handling and shutdown callbacks.
 
-SIGINT/SIGTERM set the shutdown event. Long-running loops (``run_forever``,
-``TypedConsumer.run``) stop when it is set, then run the registered callbacks
-(for example producer flushes) in reverse registration order.
+SIGINT/SIGTERM set the shutdown event. Long-running loops (``TypedConsumer.run`` and the
+services' own loops) stop when it is set, then run the registered callbacks (for example
+producer flushes) in reverse registration order.
 """
 
 import logging
@@ -10,8 +10,6 @@ import os
 import signal
 import threading
 from collections.abc import Callable
-
-_HEARTBEAT_SECONDS = 60.0
 
 _shutdown = threading.Event()
 _callbacks: list[Callable[[], None]] = []
@@ -72,13 +70,3 @@ def install_signal_handlers(log: logging.Logger | None = None) -> None:
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
     _handlers_installed = True
-
-
-def run_forever(log: logging.Logger, heartbeat: float = _HEARTBEAT_SECONDS) -> None:
-    """Block until shutdown is requested, logging a heartbeat, then run shutdown callbacks.
-
-    Keeps placeholder containers running."""
-    install_signal_handlers(log)
-    while not _shutdown.wait(heartbeat):
-        log.debug("heartbeat")
-    run_shutdown_callbacks(log)

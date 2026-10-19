@@ -6,13 +6,16 @@ Shared Python package installed into every service image (and your `.venv` for l
 | --- | --- |
 | `traffic_common.config` | `Settings` from environment variables (log level, Kafka, Postgres, MLflow URLs) |
 | `traffic_common.logging` | Consistent log format across services |
-| `traffic_common.lifecycle` | Process-wide shutdown event, SIGINT/SIGTERM handling, `on_shutdown()` callbacks, `run_forever()` |
+| `traffic_common.lifecycle` | Process-wide shutdown event, SIGINT/SIGTERM handling, `on_shutdown()` callbacks |
 | `traffic_common.topics` | `Topic` and `ConsumerGroup` names, `dead_letter_topic()` |
 | `traffic_common.enums` | Enums shared by schemas and database models (`Severity`, `IncidentStatus`, ...) |
 | `traffic_common.schemas` | Pydantic v2 message schemas and `TOPIC_SCHEMAS` (topic -> schema) |
 | `traffic_common.messaging` | `TypedProducer` / `TypedConsumer` on confluent-kafka |
 | `traffic_common.db` | SQLAlchemy 2.0 models, engine helpers, Alembic migrations, demo seed data |
 | `traffic_common.driftmode` | The demo drift mode: settings and presets, reading and switching it in Postgres, `DriftModeWatcher` for services, and a CLI (`python -m traffic_common.driftmode on\|off\|status`) |
+| `traffic_common.health` | Heartbeat files written by service loops and consumers, and the healthcheck CLI the containers run (`python -m traffic_common.health <heartbeats> --max-age 60`) |
+| `traffic_common.telemetry` | Prometheus metrics shared by every service (messages, handler time, message age, errors, consumer lag, inference latency) and `serve_metrics()`, the `/metrics` endpoint on `METRICS_PORT` |
+| `traffic_common.gazetteer` | The demo cameras' place names, aliases and misspellings, used by the simulator to write reports and by nlp_service to match them |
 
 `import traffic_common` only loads config, logging and lifecycle. Import `schemas`, `messaging` and `db` explicitly.
 
@@ -42,7 +45,7 @@ Every message has `schema_version` (currently `Literal[1]`), a `message_id` (UUI
 ## Kafka
 
 ```python
-from traffic_common import get_settings, run_forever
+from traffic_common import get_settings
 from traffic_common.messaging import TypedConsumer, TypedProducer
 from traffic_common.schemas import TrafficMetrics
 from traffic_common.topics import ConsumerGroup, Topic

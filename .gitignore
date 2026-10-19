@@ -27,13 +27,10 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
-# ---- Data & models (keep directory placeholders) ----
+# ---- Data (keep the directory) ----
 data/*
 !data/.gitkeep
 !data/README.md
-models/*
-!models/.gitkeep
-!models/README.md
 *.pt
 *.pth
 *.onnx

@@ -43,6 +43,7 @@ $checkerArgs = @("run", "--rm", "--no-deps", "-T",
     "-v", "$($outDir -replace '\\', '/'):/out",
     "api", "python", "/e2e/e2e_check.py",
     "--api", "http://api:8000",
+    "--prometheus", "http://prometheus:9090",
     "--time-scale", "$TimeScale",
     "--timeout-minutes", "$TimeoutMinutes",
     "--json", "/out/$stamp.json")

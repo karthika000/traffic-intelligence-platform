@@ -1,4 +1,4 @@
-"""Write default zone configs (roadway polygon + scale) for the 4 demo cameras.
+"""Write default zone configs (roadway polygon, scale, anomaly settings) for the 4 demo cameras.
 
 The polygons were traced on the sample videos from scripts/download_sample_videos.py
 (not the London junctions the cameras are named after). Scales come from median detected
@@ -7,7 +7,7 @@ smaller vertical scale where vehicles move towards the camera (depth is foreshor
 
 Usage (repo root, .venv active, stack up):
     python scripts/write_zone_configs.py                 # write all 4
-    python scripts/write_zone_configs.py --only-missing  # skip cameras that already have a roadway
+    python scripts/write_zone_configs.py --only-missing  # keep existing roadways, add missing keys
     python scripts/write_zone_configs.py --dry-run
     python scripts/write_zone_configs.py --preview data/zone_previews   # draw them on frames
 
@@ -48,6 +48,10 @@ DEMO_ZONE_CONFIGS: dict[str, dict] = {
         "roadway": [[0.15, 0.80], [0.55, 0.79], [1.0, 0.83], [1.0, 1.0], [0.35, 1.0], [0.15, 0.90]],
         "pixels_per_metre": 40.0,  # ~5.4 m vans span ~220 px
         "reference_width": REFERENCE_WIDTH,
+        # The footage pans along the street: the camera's motion makes parked vans "move" and
+        # moving ones "stop", and the polygon covers pavement in part of the pan. Its speeds and
+        # stopped vehicles are camera motion, not traffic, so anomaly_service ignores them here.
+        "anomaly": {"ignore": ["camera_speed", "stopped_vehicles"]},
     },
     # Multi-lane road with oncoming traffic: wide horizontally, strongly foreshortened in depth.
     "cam-old-street": {
@@ -102,7 +106,7 @@ def main() -> int:
     parser.add_argument(
         "--only-missing",
         action="store_true",
-        help="leave cameras that already have a roadway polygon",
+        help="keep a roadway polygon already set; only add the keys a config lacks",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -130,10 +134,14 @@ def main() -> int:
                         "(run: python -m traffic_common.db seed)"
                     )
                     continue
-                has_roadway = bool((current[camera_id] or {}).get("roadway"))
-                if args.only_missing and has_roadway:
-                    print(f"  {camera_id:<22} kept existing roadway")
-                    continue
+                stored = current[camera_id] or {}
+                if args.only_missing and stored.get("roadway"):
+                    missing = {k: v for k, v in config.items() if k not in stored}
+                    if not missing:
+                        print(f"  {camera_id:<22} kept existing config")
+                        continue
+                    config = {**stored, **missing}  # e.g. an "anomaly" section added later
+                    print(f"  {camera_id:<22} kept existing roadway, adding {sorted(missing)}")
                 action = "would write" if args.dry_run else "wrote"
                 if not args.dry_run:
                     conn.execute(

@@ -16,6 +16,7 @@ from traffic_common.db import create_db_engine
 from traffic_common.health import heartbeat
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedConsumer, TypedProducer
+from traffic_common.telemetry import serve_metrics
 from traffic_common.topics import ConsumerGroup, Topic
 
 SERVICE_NAME = "fusion_service"
@@ -26,6 +27,7 @@ def main() -> None:
     log = get_logger(SERVICE_NAME, settings.log_level)
     get_logger("traffic_common", settings.log_level)
     install_signal_handlers(log)
+    serve_metrics()
     config = FusionConfig.from_env()
     log.info("starting: %s", config)
     stop = shutdown_event()

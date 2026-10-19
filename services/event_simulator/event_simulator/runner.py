@@ -157,6 +157,10 @@ class ScenarioRunner(threading.Thread):
         )  # fmt: skip
         with self.camera.lock:
             self.camera.weather.override = phase.weather.as_override() if phase.weather else None
+        if phase.reports is not None and phase.reports.stage == "cleared":
+            # Someone always says it's over: the first clearing report comes as the phase starts
+            # (Poisson arrivals alone left a short, sped-up final phase without one ~5% of runs).
+            return t
         return t + self._report_gap(window)
 
     def _report_gap(self, window: PhaseWindow) -> float:

@@ -141,39 +141,6 @@ class TrafficMetric(Base):
     )
 
 
-class DetectionAggregate(Base):
-    """Per-camera, per-class object counts over a time window."""
-
-    __tablename__ = "detection_aggregates"
-
-    id: Mapped[int] = _pk()
-    camera_id: Mapped[str] = _camera_fk()
-    window_start: Mapped[datetime]
-    window_end: Mapped[datetime]
-    object_class: Mapped[str] = mapped_column(String(50))
-    object_count: Mapped[int] = mapped_column(Integer)
-    avg_confidence: Mapped[float | None]
-    model_name: Mapped[str]
-    model_version: Mapped[str] = mapped_column(String(100))
-    created_at: Mapped[datetime] = _created_at()
-
-    __table_args__ = (
-        CheckConstraint("window_end > window_start", name="window_ordered"),
-        CheckConstraint("object_count >= 0", name="object_count_non_negative"),
-        # Explicit name: the generated one would exceed PostgreSQL's 63-character identifier limit.
-        UniqueConstraint(
-            "camera_id",
-            "window_start",
-            "object_class",
-            "model_name",
-            "model_version",
-            name="uq_detection_aggregates_window_class_model",
-        ),
-        Index("ix_detection_aggregates_camera_id_window_start", "camera_id", "window_start"),
-        Index("ix_detection_aggregates_window_start", "window_start"),
-    )
-
-
 class Report(Base):
     __tablename__ = "reports"
 

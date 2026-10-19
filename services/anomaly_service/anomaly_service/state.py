@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from anomaly_service.calibration import CalibrationResult, CameraSettings
 from ml.alarm import AlarmTracker
 from ml.features import (
     BASELINE_MIN_WINDOWS,
@@ -68,6 +69,8 @@ class ActiveAnomaly:
     baseline_released: bool = False  # frozen baseline let go after max_hold_seconds
     threshold: float = 0.0  # latest, for ending the alert from outside the scoring path
     versions: dict[str, str] = field(default_factory=dict)
+    recovered_since: datetime | None = None  # traffic metrics back near the frozen baseline
+    published_recovered: datetime | None = None  # what the last published message said
 
 
 @dataclass
@@ -113,6 +116,11 @@ class CameraState:
     # the model as baseline_<col> columns and used by the hold rule until the alert ends.
     frozen_baseline: dict[str, float | None] | None = None
     health: Health | None = None
+    settings: CameraSettings = field(default_factory=CameraSettings)
+    warmup_from: datetime | None = None  # first window of the current warm-up
+    warm: bool = False
+    calibrated_for: str | None = None  # model label + settings the calibration was made for
+    calibration: CalibrationResult | None = None
 
     def __post_init__(self) -> None:
         self.rows = deque(maxlen=self.history_windows)
@@ -136,6 +144,15 @@ class CameraState:
         if self.rows and self.rows[-1]["ts"] >= m.window_end:
             return  # duplicate or out of order
         self.rows.append(row)
+        if self.warmup_from is None:
+            self.warmup_from = m.window_end
+
+    def restart_warmup(self, at: datetime) -> None:
+        """After a long gap the old windows describe another time of day: drop them, so the
+        baselines and the warm-up calibration only see what comes after the gap."""
+        self.rows.clear()
+        self.sensors.clear()
+        self.warmup_from, self.warm, self.calibrated_for = at, False, None
 
     @property
     def latest_ts(self) -> datetime | None:

@@ -73,7 +73,7 @@ def test_incident_sequence_raises_anomaly(kafka_bootstrap: str, scratch_database
     stop = threading.Event()
     with TypedProducer(kafka_bootstrap, register_shutdown=False) as producer:
         # One scoring pass after the burst, so a single check above threshold must suffice.
-        cfg = AnomalyConfig(max_metric_age_seconds=600, min_consecutive=1)
+        cfg = AnomalyConfig(warmup_seconds=0, max_metric_age_seconds=600, min_consecutive=1)
         service = AnomalyService(cfg, engine, mm, producer.send)
         consumer = TypedConsumer(
             [Topic.TRAFFIC_METRICS],

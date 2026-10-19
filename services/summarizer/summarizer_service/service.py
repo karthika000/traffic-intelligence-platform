@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from prometheus_client import Counter
 from sqlalchemy import Engine, text
 from sqlalchemy.dialects.postgresql import insert
 
@@ -17,10 +18,16 @@ from summarizer_service.config import SummarizerServiceConfig
 from traffic_common.db.models import Summary as SummaryRow
 from traffic_common.db.registry import record_model_version
 from traffic_common.schemas import Incident, Summary
+from traffic_common.telemetry import INFERENCE_SECONDS, SERVICE_ERRORS
 from traffic_common.topics import Topic
 
 log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
+SUMMARIES = Counter(
+    "traffic_summaries_total",
+    "Summaries written, by path: model output, or the template (fallback or champion)",
+    ["generation"],
+)
 
 
 @dataclass
@@ -118,6 +125,7 @@ class SummarizerService:
                 p.attempts += 1
                 if p.attempts >= MAX_ATTEMPTS:
                     self.stats.failed += 1
+                    SERVICE_ERRORS.labels("summary").inc()
                     if isinstance(exc, LookupError):  # e.g. another database's test incident
                         log.warning("skipping incident %s: %s", p.incident["incident_id"], exc)
                     else:
@@ -189,6 +197,9 @@ class SummarizerService:
             self.last[key] = state_of(incident)
         self.stats.summarised += 1
         setattr(self.stats, result.generation, getattr(self.stats, result.generation) + 1)
+        SUMMARIES.labels(result.generation).inc()
+        # The whole generation (with the faithfulness guard and any fallback), per summary.
+        INFERENCE_SECONDS.labels(model.name).observe((result.latency_ms or 0) / 1000)
         log.warning(
             "SUMMARY v%d %s %s/%s via %s (%.0f ms%s): %s | %s",
             ctx.version,

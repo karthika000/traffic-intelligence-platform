@@ -118,7 +118,7 @@ class MLPClassifier:
                 loss = loss_fn(self.net(Xt[idx]), yt[idx])
                 loss.backward()
                 opt.step()
-                total += float(loss) * len(idx)
+                total += loss.item() * len(idx)
             f1 = macro_f1(y_val, self.predict(X_val))
             history.append({"epoch": epoch, "train_loss": total / len(Xt), "val_macro_f1": f1})
             if f1 > best:

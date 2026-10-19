@@ -145,7 +145,7 @@ def engine() -> FusionEngine:
         "cam-elephant-castle",
         "cam-trafalgar-square",
     ]
-    return FusionEngine(FusionConfig(), {c: c for c in names})
+    return FusionEngine(FusionConfig(vision_warmup_seconds=0), {c: c for c in names})
 
 
 # ----------------------------------------------------------------------------- types
@@ -446,6 +446,53 @@ def test_metrics_must_be_back_near_baseline(engine) -> None:
     assert inc.status == "resolved"
 
 
+def test_no_vision_only_incident_before_the_camera_warmed_up() -> None:
+    engine = FusionEngine(FusionConfig(), {CAM: CAM})  # vision_warmup_seconds 600
+    for i in range(60):  # 5 minutes of metrics
+        engine.on_metrics(metrics_at(i * 5 - 300, 30.0))
+    engine.on_anomaly(anomaly(0), at(0))
+    assert not engine.open_on(CAM)
+    burst(engine, 10)  # a text burst still creates one, and takes in the anomaly
+    assert only(engine).anomalies
+    engine = FusionEngine(FusionConfig(), {CAM: CAM})
+    for i in range(130):  # 10 min 50 s
+        engine.on_metrics(metrics_at(i * 5 - 650, 30.0))
+    engine.on_anomaly(anomaly(0), at(0))
+    assert only(engine).status == "suspected"
+    # A gap in the metrics starts the warm-up again.
+    engine = FusionEngine(FusionConfig(), {CAM: CAM})
+    for i in range(130):
+        engine.on_metrics(metrics_at(i * 5 - 650 - (200 if i < 100 else 0), 30.0))
+    engine.on_anomaly(anomaly(0), at(0))
+    assert not engine.open_on(CAM)
+
+
+def test_recovered_anomaly_with_a_clearing_report_resolves_before_it_ends(engine) -> None:
+    aid = uuid.uuid4()
+    engine.on_anomaly(anomaly(0, anomaly_id=aid), at(0))
+    burst(engine, 10)
+    engine.on_nlp(report(60, stage="cleared", source="operator"), at(60))
+    engine.tick(at(200))
+    assert only(engine).status == "confirmed"  # active and not recovered: held open
+    update = anomaly(210, "update", anomaly_id=aid)
+    update.details["recovered_since"] = at(205).isoformat()
+    engine.on_anomaly(update, at(210))
+    engine.tick(at(215))
+    assert only(engine).status == "confirmed"  # recovered for 10 s < clear_min_seconds (20)
+    engine.tick(at(226))
+    assert not engine.open_on(CAM)
+    assert "anomaly recovered" in engine.drain()[-1].incident.resolution
+    # Without a clearing report, recovery alone doesn't resolve it.
+    aid = uuid.uuid4()
+    engine.on_anomaly(anomaly(1000, anomaly_id=aid), at(1000))
+    burst(engine, 1010)
+    update = anomaly(1100, "update", anomaly_id=aid)
+    update.details["recovered_since"] = at(1050).isoformat()
+    engine.on_anomaly(update, at(1100))
+    engine.tick(at(1200))
+    assert only(engine).status in ("suspected", "confirmed")
+
+
 def metrics_at(t: float, speed: float) -> TrafficMetrics:
     end = at(t)
     return TrafficMetrics(
@@ -496,7 +543,12 @@ def test_restart_recovers_open_incidents_without_duplicates(db) -> None:
 
     now = {"t": at(0)}
     sent: list = []
-    first = FusionService(FusionConfig(), db, lambda t, m: sent.append(m), clock=lambda: now["t"])
+    first = FusionService(
+        FusionConfig(vision_warmup_seconds=0),
+        db,
+        lambda t, m: sent.append(m),
+        clock=lambda: now["t"],
+    )
     reports = [report(i, source=SOURCES[i % 4]) for i in range(5)]
     for r in reports:
         store_report(db, r)
@@ -509,7 +561,12 @@ def test_restart_recovers_open_incidents_without_duplicates(db) -> None:
     assert n_evidence == 5
 
     # "Restart": a new service rebuilds from Postgres; the last report is redelivered.
-    second = FusionService(FusionConfig(), db, lambda t, m: sent.append(m), clock=lambda: now["t"])
+    second = FusionService(
+        FusionConfig(vision_warmup_seconds=0),
+        db,
+        lambda t, m: sent.append(m),
+        clock=lambda: now["t"],
+    )
     assert second.recover() == 1
     restored = only(second.fusion)
     assert restored.incident_id == incident_id and restored.status == "confirmed"
@@ -535,7 +592,9 @@ def test_evidence_waits_for_its_target_row(db) -> None:
     from fusion_service.service import FusionService
 
     sent: list = []
-    svc = FusionService(FusionConfig(), db, lambda t, m: sent.append(m), clock=lambda: at(0))
+    svc = FusionService(
+        FusionConfig(vision_warmup_seconds=0), db, lambda t, m: sent.append(m), clock=lambda: at(0)
+    )
     for i in range(4):
         svc.handle(report(i, source=SOURCES[i]))  # their report rows don't exist yet
     assert len(svc.store.pending) == 4

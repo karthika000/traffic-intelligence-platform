@@ -13,6 +13,7 @@ from cv_inference.service import CvService
 from traffic_common import get_logger, get_settings, shutdown_event
 from traffic_common.db import create_db_engine
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
+from traffic_common.telemetry import serve_metrics
 
 SERVICE_NAME = "cv_inference"
 
@@ -22,6 +23,7 @@ def main() -> None:
     log = get_logger(SERVICE_NAME, settings.log_level)  # module loggers are cv_inference.*
     get_logger("traffic_common", settings.log_level)
     install_signal_handlers(log)
+    serve_metrics()
 
     config = CvConfig.from_env()
     log.info("starting: %s", config)

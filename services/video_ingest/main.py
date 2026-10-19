@@ -13,6 +13,7 @@ from traffic_common.health import heartbeat
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedProducer
 from traffic_common.schemas import FrameMessage
+from traffic_common.telemetry import serve_metrics
 from traffic_common.topics import Topic
 from video_ingest.config import IngestConfig
 from video_ingest.supervisor import Supervisor
@@ -25,6 +26,7 @@ def main() -> None:
     log = get_logger(SERVICE_NAME, settings.log_level)  # module loggers are video_ingest.*
     get_logger("traffic_common", settings.log_level)  # producer delivery errors
     install_signal_handlers(log)
+    serve_metrics()
 
     config = IngestConfig.from_env()
     log.info("starting: %s", config)

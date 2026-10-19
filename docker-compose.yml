@@ -13,6 +13,8 @@ x-python-env: &python-env
   MLFLOW_TRACKING_URI: http://mlflow:5000
   # Zone for clock times in summaries; the dashboard shows times in the same zone.
   DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Europe/London}
+  # Prometheus metrics (traffic_common.telemetry) on :9100/metrics inside the network.
+  METRICS_PORT: "9100"
 
 # What every app service needs before it starts: healthy Kafka and Postgres, and the schema
 # migrated (the one-shot `migrate` service). Services that need more merge this in.
@@ -81,7 +83,6 @@ services:
     <<: *python-service
     build: { context: ., dockerfile: services/cv_inference/Dockerfile }
     volumes:
-      - ./models:/models:ro
       - frames:/data/frames:ro
       - annotated:/data/annotated   # latest annotated frame per camera
       - weights:/weights            # YOLO weights, MLflow downloads, OpenVINO export cache
@@ -100,7 +101,6 @@ services:
     <<: *python-service
     build: { context: ., dockerfile: services/nlp_service/Dockerfile }
     volumes:
-      - ./models:/models:ro
       - hf_cache:/hf_cache   # NER weights, downloaded once
     depends_on:
       <<: *base-deps
@@ -114,8 +114,6 @@ services:
   anomaly_service:
     <<: *python-service
     build: { context: ., dockerfile: services/anomaly_service/Dockerfile }
-    volumes:
-      - ./models:/models:ro
     depends_on:
       <<: *base-deps
       mlflow:
@@ -320,6 +318,57 @@ services:
     restart: unless-stopped
     networks: [traffic]
 
+  # Metrics: Prometheus scrapes every service's /metrics (infra/prometheus/prometheus.yml);
+  # Grafana opens on the provisioned "Traffic Intelligence" dashboard, viewable without a login.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9090/-/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    restart: unless-stopped
+    networks: [traffic]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"   # read-only viewers need no login (local demo)
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/traffic-intelligence.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+    networks: [traffic]
+
   # Drift monitoring: Evidently checks of every champion against its reference snapshot every
   # DRIFT_CHECK_INTERVAL_MINUTES, results to drift_reports and MLflow ("drift-monitoring"),
   # DriftAlerts to drift.alerts. Same image as ml-trainer. On-demand checks:
@@ -414,3 +463,5 @@ volumes:
   kafka_data:
   postgres_data:
   mlflow_artifacts:
+  prometheus_data:
+  grafana_data:

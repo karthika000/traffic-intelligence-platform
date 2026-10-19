@@ -11,7 +11,11 @@ exception), comes back as
     {"error": {"status": 404, "code": "not_found", "message": "...", "request_id": "...",
                "details": [...]}}
 
-``details`` is only present for validation errors (one entry per invalid field)."""
+``details`` is only present for validation errors (one entry per invalid field).
+
+Prometheus metrics are served at ``/metrics``: requests by method, route template and status,
+their latency, and requests in flight, plus the shared ``traffic_common.telemetry`` metrics
+(the live consumer's messages) and the process collectors."""
 
 import json
 import logging
@@ -23,13 +27,24 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 access_log = logging.getLogger("api_service.access")
 log = logging.getLogger(__name__)
-QUIET_PATHS = {"/health", "/ready"}
+QUIET_PATHS = {"/health", "/ready", "/metrics"}
+REQUESTS = Counter(
+    "traffic_api_requests_total", "HTTP requests by route template", ["method", "route", "status"]
+)
+REQUEST_SECONDS = Histogram(
+    "traffic_api_request_duration_seconds",
+    "Time to the response headers (for MJPEG streams: until streaming starts)",
+    ["method", "route"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
+IN_FLIGHT = Gauge("traffic_api_requests_in_flight", "HTTP requests being handled")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
@@ -109,6 +124,10 @@ def install(app: FastAPI) -> None:
         log.exception("unhandled error on %s %s", request.method, request.url.path)
         return error_response(request, 500, "internal error")
 
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     @app.middleware("http")
     async def request_log(request: Request, call_next):
         incoming = request.headers.get("x-request-id", "")
@@ -116,11 +135,19 @@ def install(app: FastAPI) -> None:
         request.state.request_id = request_id
         started = time.perf_counter()
         status = 500
+        IN_FLIGHT.inc()
         try:
             response = await call_next(request)
             status = response.status_code
         finally:
-            ms = round((time.perf_counter() - started) * 1000, 1)
+            IN_FLIGHT.dec()
+            elapsed = time.perf_counter() - started
+            ms = round(elapsed * 1000, 1)
+            # The route template, not the path, so ids don't explode the label set.
+            route = getattr(request.scope.get("route"), "path", None) or "unmatched"
+            if route != "/metrics":
+                REQUESTS.labels(request.method, route, str(status)).inc()
+                REQUEST_SECONDS.labels(request.method, route).observe(elapsed)
             access_log.log(
                 logging.DEBUG if request.url.path in QUIET_PATHS else logging.INFO,
                 json.dumps(

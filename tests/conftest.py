@@ -90,3 +90,21 @@ def scratch_database_module(postgres_url: str) -> Iterator[str]:
     """One throwaway database shared by a module's tests (seeded once)."""
     with _scratch(postgres_url) as url:
         yield url
+
+
+INFRA_FIXTURES = {"kafka_bootstrap", "postgres_url"}
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "integration: needs Kafka or Postgres (marked automatically from its fixtures)"
+    )
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark every test that needs Kafka or Postgres, directly or through another fixture, so
+    CI can run the rest without them (``-m "not integration"``) and these against service
+    containers (``-m integration``)."""
+    for item in items:
+        if INFRA_FIXTURES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(pytest.mark.integration)

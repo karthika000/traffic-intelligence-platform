@@ -20,6 +20,7 @@ from traffic_common.db import create_db_engine
 from traffic_common.db.registry import record_model_version
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedConsumer, TypedProducer
+from traffic_common.telemetry import serve_metrics
 from traffic_common.topics import ConsumerGroup, Topic
 
 SERVICE_NAME = "nlp_service"
@@ -31,6 +32,7 @@ def main() -> None:
     get_logger("traffic_common", settings.log_level)
     get_logger("ml", settings.log_level)
     install_signal_handlers(log)
+    serve_metrics()
     config = NlpConfig.from_env()
     log.info("starting: %s", config)
     import torch

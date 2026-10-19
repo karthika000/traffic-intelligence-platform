@@ -18,7 +18,6 @@ from traffic_common.db.seed import DEMO_CAMERAS, seed_cameras
 EXPECTED_TABLES = {
     "cameras",
     "traffic_metrics",
-    "detection_aggregates",
     "reports",
     "nlp_results",
     "anomalies",
@@ -40,7 +39,7 @@ EXPECTED_TABLES = {
 
 def test_single_head_revision() -> None:
     heads = ScriptDirectory.from_config(alembic_config("postgresql://x@localhost/x")).get_heads()
-    assert heads == ["0013"]
+    assert heads == ["0014"]
 
 
 def test_upgrade_and_downgrade(scratch_database: str) -> None:
@@ -57,7 +56,7 @@ def test_upgrade_and_downgrade(scratch_database: str) -> None:
                 MigrationContext.configure(conn, opts={"compare_type": True}), Base.metadata
             )
             assert diff == []
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "0013"
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "0014"
 
         indexes = {i["name"] for i in insp.get_indexes("incidents")}
         assert {"ix_incidents_camera_id_start_time", "ix_incidents_start_time"} <= indexes

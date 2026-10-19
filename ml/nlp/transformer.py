@@ -160,9 +160,9 @@ def train(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-            running += float(loss)
+            running += loss.item()
             if step % 50 == 0:
-                log.info("epoch %d step %d/%d loss %.4f", epoch, step, steps_per_epoch, float(loss))
+                log.info("epoch %d step %d/%d loss %.4f", epoch, step, steps_per_epoch, loss.item())
         val = _scores(predict_proba(model, tokenizer, val_texts, cfg.max_length), val_labels)
         entry = {
             "epoch": epoch,

@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  RUFF_VERSION: "0.17.0"   # the versions the repo was last checked with locally
+  MYPY_VERSION: "2.4.0"
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: shared/pyproject.toml
+      - name: Install ruff, mypy and the shared package
+        run: pip install -e "shared[dev]" "ruff==${RUFF_VERSION}" "mypy==${MYPY_VERSION}"
+      - name: ruff check
+        run: ruff check --output-format=github .
+      - name: ruff format --check
+        run: ruff format --check .
+      - name: mypy (shared package)
+        working-directory: shared
+        run: mypy
+
+  dashboard:
+    name: Dashboard (typecheck, lint, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run check
+
+  images:
+    name: Build ${{ matrix.name }} image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: video_ingest, context: ., file: services/video_ingest/Dockerfile }
+          - { name: event_simulator, context: ., file: services/event_simulator/Dockerfile }
+          - { name: cv_inference, context: ., file: services/cv_inference/Dockerfile }
+          - { name: nlp_service, context: ., file: services/nlp_service/Dockerfile }
+          - { name: anomaly_service, context: ., file: services/anomaly_service/Dockerfile }
+          - { name: fusion_service, context: ., file: services/fusion_service/Dockerfile }
+          - { name: summarizer, context: ., file: services/summarizer/Dockerfile }
+          - { name: api, context: ., file: services/api/Dockerfile }
+          - { name: ml, context: ., file: ml/Dockerfile }
+          - { name: mlflow, context: infra/mlflow, file: infra/mlflow/Dockerfile }
+          - { name: dashboard, context: dashboard, file: dashboard/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (the PyTorch / OpenVINO images need several GB)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: false
+          tags: traffic-intel/${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  # Both test jobs run the suite in tests/Dockerfile's image, as scripts/test.ps1 does locally,
+  # so CI and a developer's machine use the same dependencies.
+  unit:
+    name: Unit tests (no Kafka or Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tests/Dockerfile
+          load: true
+          tags: traffic-intel/tests:ci
+          cache-from: type=gha,scope=tests
+          cache-to: type=gha,scope=tests,mode=max
+      - name: pytest -m "not integration"
+        run: >-
+          docker run --rm -v "$PWD:/repo" -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2
+          traffic-intel/tests:ci -m "not integration" -rs -q
+
+  integration:
+    name: Integration tests (Kafka and Postgres service containers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: traffic
+          POSTGRES_PASSWORD: traffic
+          POSTGRES_DB: traffic
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U traffic -d traffic"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      kafka:
+        # The image's default configuration is a single-node KRaft broker on localhost:9092.
+        image: apache/kafka:3.8.0
+        ports: ["9092:9092"]
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 10s --health-timeout 15s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tests/Dockerfile
+          load: true
+          tags: traffic-intel/tests:ci
+          cache-from: type=gha,scope=tests
+      - name: Create the Kafka topics (as scripts/create_topics.ps1 does)
+        run: |
+          docker run --rm --network host -v "$PWD:/repo" --entrypoint python traffic-intel/tests:ci -c '
+          from confluent_kafka.admin import AdminClient, NewTopic
+          from traffic_common.topics import ConsumerGroup, Topic, dead_letter_topic
+          topics = [NewTopic(str(t), num_partitions=3, replication_factor=1) for t in Topic]
+          topics += [NewTopic(dead_letter_topic(g), num_partitions=1, replication_factor=1) for g in ConsumerGroup]
+          admin = AdminClient({"bootstrap.servers": "localhost:9092"})  # keep a reference until done
+          for name, future in admin.create_topics(topics).items():
+              future.result()
+              print("created", name)
+          '
+      - name: pytest -m integration
+        run: >-
+          docker run --rm --network host -v "$PWD:/repo"
+          -e KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+          -e POSTGRES_URL=postgresql://traffic:traffic@localhost:5432/traffic
+          -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2
+          traffic-intel/tests:ci -m integration -rs -q

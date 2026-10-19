@@ -1,12 +1,11 @@
 """Smoke tests for the repository skeleton."""
 
 import ast
-import threading
 from pathlib import Path
 
 import pytest
 
-from traffic_common import get_logger, get_settings, on_shutdown, request_shutdown, run_forever
+from traffic_common import get_logger, get_settings, on_shutdown
 from traffic_common.lifecycle import run_shutdown_callbacks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,14 +53,6 @@ def test_shutdown_callbacks_run_newest_first_and_survive_failures() -> None:
     assert order == ["last", "first"]
     run_shutdown_callbacks()  # callbacks run once
     assert order == ["last", "first"]
-
-
-def test_run_forever_returns_on_shutdown_and_runs_callbacks() -> None:
-    ran: list[bool] = []
-    on_shutdown(lambda: ran.append(True))
-    threading.Timer(0.2, request_shutdown).start()
-    run_forever(get_logger("lifecycle-test"), heartbeat=0.05)
-    assert ran == [True]
 
 
 def test_logger_is_not_duplicated() -> None:

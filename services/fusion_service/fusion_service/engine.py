@@ -13,7 +13,11 @@ recent metrics); a sliding window (``window_seconds``) bounds what can be groupe
   (``confirm_min_agreement``), or when one modality alone scores ``strong_single``.
 - Resolved when no attached anomaly is active, camera metrics are back near the baseline
   from before the incident, and either a clearing report has arrived (then after only
-  ``clear_min_seconds``) or nothing new has arrived for ``quiet_seconds``.
+  ``clear_min_seconds``) or nothing new has arrived for ``quiet_seconds``. With a clearing
+  report, an anomaly whose traffic metrics have recovered (anomaly_service's
+  ``recovered_since``) for ``clear_min_seconds`` no longer holds the incident open.
+- A camera's anomalies alone create no incident until it has ``vision_warmup_seconds`` of
+  uninterrupted metrics.
 - Reports with no camera match wait in an "unlocated" pool and join an open incident whose
   reports name the same place.
 - Start time: the first evidence that supports the incident's (current, finally its last) type,
@@ -133,6 +137,9 @@ class FusionEngine:
         a.degraded = a.degraded or self._degraded(m.camera_id) or "camera_degraded" in a.hints
         if m.event == "end":
             a.active, a.ended_at = False, m.ended_at or m.timestamp
+        elif "recovered_since" in m.details:  # updates say whether traffic has recovered
+            since = m.details["recovered_since"]
+            a.recovered_since = datetime.fromisoformat(since) if since else None
         inc = self._incident_for_anomaly(a)
         if inc is not None and a.traffic:
             self._attach_anomaly(inc, a, "anomaly " + m.event)
@@ -364,7 +371,23 @@ class FusionEngine:
                     best = t
         return best
 
+    def _warmed_up(self, camera_id: str, now: datetime) -> bool:
+        """The camera has had ``vision_warmup_seconds`` of metrics without a gap (0: off)."""
+        if self.cfg.vision_warmup_seconds <= 0:
+            return True
+        q = self.metrics.get(camera_id)
+        if not q or (now - q[-1].ts).total_seconds() > self.cfg.metrics_gap_seconds:
+            return False
+        start = q[-1].ts
+        for p in reversed(q):
+            if (start - p.ts).total_seconds() > self.cfg.metrics_gap_seconds:
+                break
+            start = p.ts
+        return (now - start).total_seconds() >= self.cfg.vision_warmup_seconds
+
     def _vision_firing(self, camera_id: str, now: datetime) -> list[AnomalyEvidence]:
+        if not self._warmed_up(camera_id, now):
+            return []
         fresh = now - timedelta(seconds=self.cfg.max_message_age_seconds)
         return [
             a
@@ -524,10 +547,23 @@ class FusionEngine:
                 self._attach_metric(inc, "resolved")
 
     def _resolution(self, inc: FusedIncident, now: datetime) -> str | None:
-        if inc.active_anomaly:
+        active = inc.active_anomalies
+        # An active anomaly holds the incident open unless a clearing report has arrived and
+        # every active one reports its traffic recovered (it ends a little later).
+        recovered = (
+            inc.cleared_at is not None
+            and bool(active)
+            and all(a.recovered_since is not None for a in active)
+        )
+        if active and not recovered:
             return None
         near, detail = self._near_baseline(inc, now)
         if not near:
+            return None
+        if recovered:
+            since = max(a.recovered_since for a in active if a.recovered_since)
+            if (now - since).total_seconds() >= self.cfg.clear_min_seconds:
+                return f"clearing report, anomaly recovered, {detail}"
             return None
         ends = [a.ended_at for a in inc.anomalies.values() if a.traffic and a.ended_at]
         since_anomaly = (now - max(ends)).total_seconds() if ends else float("inf")
@@ -645,6 +681,7 @@ class FusionEngine:
         anomalies: list[AnomalyEvidence],
         reports: list[ReportEvidence],
         system: dict | None,
+        metrics: list[tuple[str, MetricPoint]] | None = None,
     ) -> None:
         """Rebuild state from Postgres: open incidents (with their evidence) and the recent
         pools. Evidence already attached is keyed by id, so redelivered messages after a
@@ -664,4 +701,6 @@ class FusionEngine:
                     self.unlocated.setdefault(ev.report_id, ev)
             else:
                 self.reports.setdefault(ev.camera_id, {}).setdefault(ev.report_id, ev)
+        for camera_id, point in metrics or []:  # oldest first
+            self.metrics.setdefault(camera_id, deque(maxlen=400)).append(point)
         self.system = system

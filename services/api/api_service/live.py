@@ -23,15 +23,20 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from confluent_kafka import Consumer, KafkaException
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from prometheus_client import Gauge
 from pydantic import ValidationError
 
 from traffic_common.schemas import TOPIC_SCHEMAS
+from traffic_common.telemetry import MESSAGE_AGE_SECONDS, MESSAGE_ERRORS, MESSAGES_CONSUMED
 from traffic_common.topics import Topic
 
 log = logging.getLogger(__name__)
+LIVE_GROUP = "api-live"  # metric label: each API process has its own throwaway group
+WS_CLIENTS = Gauge("traffic_api_websocket_clients", "Connected /ws/live clients")
 LIVE_TOPICS = (
     Topic.INCIDENTS,
     Topic.SUMMARIES,
@@ -144,7 +149,11 @@ class LiveHub:
             value = TOPIC_SCHEMAS[topic].model_validate_json(raw or b"")
         except ValidationError:
             self.stats["invalid"] += 1
+            MESSAGE_ERRORS.labels(topic, "validation").inc()
             return
+        MESSAGES_CONSUMED.labels(topic, LIVE_GROUP).inc()
+        age = (datetime.now(UTC) - value.timestamp).total_seconds()
+        MESSAGE_AGE_SECONDS.labels(topic, LIVE_GROUP).observe(max(age, 0.0))
         cams = camera_ids(value)
         if topic == Topic.TRAFFIC_METRICS and cams:
             now = time.monotonic()
@@ -168,10 +177,12 @@ class LiveHub:
     def register(self, topics: set[str] | None, cameras: set[str] | None) -> Client:
         client = Client(asyncio.Queue(self.queue_size), topics, cameras)
         self.clients.add(client)
+        WS_CLIENTS.set(len(self.clients))
         return client
 
     def unregister(self, client: Client) -> None:
         self.clients.discard(client)
+        WS_CLIENTS.set(len(self.clients))
 
     def publish(self, topic: str, cams: list[str], text: str) -> None:
         """Never blocks: a full client queue loses its oldest message instead."""

@@ -236,7 +236,7 @@ def train_autoencoder(
             loss = loss_fn(model(xb), xb)
             loss.backward()
             opt.step()
-            total += float(loss) * len(xb)
+            total += loss.item() * len(xb)
         val_loss = (
             float(((reconstruct(model, val) - val) ** 2).mean()) if len(val) else float("nan")
         )

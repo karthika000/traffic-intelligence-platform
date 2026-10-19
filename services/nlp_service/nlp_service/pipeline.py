@@ -14,6 +14,7 @@ from ml.nlp.ner import NerExtractor
 from ml.nlp.stage import report_stage
 from ml.registry import LoadedModel
 from traffic_common.schemas import Entity, NLPResult, TextReport
+from traffic_common.telemetry import INFERENCE_SECONDS, timed
 
 log = logging.getLogger(__name__)
 MATCHER_VERSION = "gazetteer-fuzzy-1"
@@ -40,8 +41,13 @@ class NlpPipeline:
         started = time.perf_counter()
         model = self.classifier()
         texts = [r.text for r in reports]
-        predictions = model.predictor.predict(pd.DataFrame({"text": texts}))
-        ner = self.ner.extract(texts) if self.ner is not None else [[] for _ in texts]
+        with timed(INFERENCE_SECONDS, model=model.name):  # one call per batch
+            predictions = model.predictor.predict(pd.DataFrame({"text": texts}))
+        if self.ner is not None:
+            with timed(INFERENCE_SECONDS, model=self.ner.model_name):
+                ner = self.ner.extract(texts)
+        else:
+            ner = [[] for _ in texts]
         matcher = self.matcher()
         versions = self.model_versions(model)
         per_report_ms = (time.perf_counter() - started) * 1000 / len(reports)

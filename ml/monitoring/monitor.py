@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from prometheus_client import Gauge, Histogram
 from sqlalchemy import Engine, insert, text
 
 from ml.lifecycle.records import recommend_retraining, set_recommendation_status
@@ -35,6 +36,21 @@ from traffic_common.topics import Topic
 log = logging.getLogger(__name__)
 RETRAINABLE = ("congestion-classifier", "traffic-anomaly-detector", "incident-text-classifier")
 FRAME_FILES_MINUTES = 10  # video_ingest keeps about this much of frame files
+STATUS_VALUES = {"no_data": -1, "ok": 0, "warning": 1, "drifted": 2}
+DRIFT_STATUS = Gauge(
+    "traffic_drift_status",
+    "Latest drift check per model: -1 no_data, 0 ok, 1 warning, 2 drifted",
+    ["model"],
+)
+DRIFT_SHARE = Gauge(
+    "traffic_drift_share", "Share of drifted features in the latest check", ["model"]
+)
+DRIFT_CHECK_SECONDS = Histogram(
+    "traffic_drift_check_seconds",
+    "Duration of one model's drift check",
+    ["model"],
+    buckets=(1, 5, 10, 30, 60, 120, 300, 600),
+)
 
 
 class Monitor:
@@ -90,8 +106,12 @@ class Monitor:
         store: bool = True,
     ) -> CheckResult:
         """``store=False`` (a dry run) records nothing: no rows, MLflow run or alert."""
-        with self._lock:
-            return self._check(model_name, window_minutes, now, publish, log_mlflow, store)
+        with self._lock, DRIFT_CHECK_SECONDS.labels(model_name).time():
+            result = self._check(model_name, window_minutes, now, publish, log_mlflow, store)
+        if store:
+            DRIFT_STATUS.labels(model_name).set(STATUS_VALUES.get(result.status, -1))
+            DRIFT_SHARE.labels(model_name).set(result.drift_share)
+        return result
 
     def _check(
         self, model_name, window_minutes, now, publish, log_mlflow, store=True

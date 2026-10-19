@@ -1,9 +1,10 @@
 """End-to-end check of the running platform, through the API only (standard library only, so
 it runs anywhere with Python 3.11; scripts/e2e_test.ps1 runs it in the api image).
 
-Triggers every scenario at once, each on a different camera, then follows each run until its
-incident has resolved or the timeout is reached. A run passes when, for the incident carrying
-the run's reports (matched by the reports' scenario_id):
+Waits for anomaly_service's camera warm-up (--prometheus) and for cameras without an open
+incident, triggers every scenario at once, each on a different camera, then follows each run
+until its incident has resolved or the timeout is reached. A run passes when, for the
+incident carrying the run's reports (matched by the reports' scenario_id):
 
 - confirmed:   it reached "confirmed" (confirmed_at is set)
 - type:        its incident type is the scenario's
@@ -119,6 +120,27 @@ def pick_cameras(cameras: list[dict], n: int) -> list[str]:
     if len(ids) < n:
         raise SystemExit(f"need {n} cameras for {n} scenarios, found {len(ids)}")
     return ids[:n]
+
+
+def wait_for_warm_up(prometheus: str, minutes: float) -> None:
+    """Wait up to ``minutes`` until anomaly_service reports no camera in its warm-up (it raises
+    no traffic alerts before then), going ahead if Prometheus can't be reached."""
+    if not prometheus:
+        return
+    url = prometheus.rstrip("/") + "/api/v1/query?query=traffic_cameras_warming_up"
+    deadline = time.monotonic() + minutes * 60
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                result = json.load(resp)["data"]["result"]
+            warming = int(float(result[0]["value"][1])) if result else None
+        except (OSError, ValueError, KeyError, IndexError) as exc:
+            print(f"warm-up state unavailable ({exc}); not waiting for it", flush=True)
+            return
+        if warming == 0 or time.monotonic() >= deadline:
+            return
+        print(f"waiting for anomaly_service's warm-up: {warming} camera(s) left", flush=True)
+        time.sleep(15)
 
 
 def wait_for_cameras(api: Api, n: int, minutes: float) -> list[str]:
@@ -240,6 +262,11 @@ def main() -> int:
         default=10.0,
         help="wait this long for cameras without an open incident before triggering",
     )
+    parser.add_argument(
+        "--prometheus",
+        default="",
+        help="Prometheus URL: wait for anomaly_service's camera warm-up before triggering",
+    )
     parser.add_argument("--scenarios", default="", help="comma-separated; default: all")
     parser.add_argument("--json", default="", help="write the results here")
     args = parser.parse_args()
@@ -254,7 +281,9 @@ def main() -> int:
     if wanted:
         scenarios = [s for s in scenarios if s["name"] in wanted]
     scenarios.sort(key=lambda s: s["name"])
+    wait_for_warm_up(args.prometheus, args.wait_free_minutes)
     cameras = wait_for_cameras(api, len(scenarios), args.wait_free_minutes)
+    wait_for_warm_up(args.prometheus, args.wait_free_minutes)  # a restart while waiting
     runs = [
         Run(s["name"], cam, s["incident_type"], s["duration_seconds"] / args.time_scale)
         for s, cam in zip(scenarios, cameras, strict=True)

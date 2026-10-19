@@ -180,7 +180,9 @@ def service(scratch_database: str):
     sent: list = []
     mm = manager(FakeRegistry(), [], [])
     mm.refresh()  # rule-based models
-    cfg = AnomalyConfig(max_metric_age_seconds=10**9, cooldown_seconds=60, clear_after=3)
+    cfg = AnomalyConfig(
+        warmup_seconds=0, max_metric_age_seconds=10**9, cooldown_seconds=60, clear_after=3
+    )
     svc = AnomalyService(cfg, engine, mm, lambda topic, m: sent.append((topic, m)))
     yield svc, sent, engine
     engine.dispose()
@@ -251,7 +253,7 @@ def test_cooldown_suppresses_immediate_retrigger(service) -> None:
 
 def test_stale_metrics_are_not_scored(service) -> None:
     svc, sent, _ = service
-    svc.cfg = AnomalyConfig(max_metric_age_seconds=60)
+    svc.cfg = AnomalyConfig(warmup_seconds=0, max_metric_age_seconds=60)
     svc.handle(metrics("cam-a", datetime.now(UTC) - timedelta(minutes=5)))
     svc.score_all()
     assert svc.stats.stale_metrics == 1 and "cam-a" not in svc.cameras and sent == []
@@ -326,7 +328,7 @@ def test_frozen_baseline_is_passed_to_the_model_and_held(service) -> None:
 
 def test_frozen_baseline_is_released_after_max_hold(service) -> None:
     svc, sent, _ = service
-    svc.cfg = AnomalyConfig(max_metric_age_seconds=10**9, max_hold_seconds=60)
+    svc.cfg = AnomalyConfig(warmup_seconds=0, max_metric_age_seconds=10**9, max_hold_seconds=60)
     cam = "cam-old-street"
     t = feed(svc, cam, T0, 40)
     t = feed(svc, cam, t, 8, avg_speed_kmh=4.0)
@@ -341,7 +343,10 @@ def test_escalation_publishes_update(service) -> None:
     from sqlalchemy import text
 
     svc.cfg = AnomalyConfig(
-        max_metric_age_seconds=10**9, severity_bounds="1.5,2.5,4", update_min_interval_seconds=0
+        warmup_seconds=0,
+        max_metric_age_seconds=10**9,
+        severity_bounds="1.5,2.5,4",
+        update_min_interval_seconds=0,
     )
     cam = "cam-elephant-castle"
     t = feed(svc, cam, T0, 30)
@@ -426,7 +431,10 @@ def test_system_degradation_replaces_per_camera_alerts(service) -> None:
     assert svc.system is None and all(s.active is None for s in svc.cameras.values())
 
     feed_all(svc, t, 6)  # normal afterwards: nothing new
-    assert len(sent) == len(ends) + 2
+    # (an update said Old Street's traffic had recovered before the episode closed its alert)
+    updates = [m for _, m in sent if m.event == "update"]
+    assert all(m.details["recovered_since"] for m in updates)
+    assert len(sent) == len(ends) + 2 + len(updates)
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT scope, camera_id, status, affected_cameras FROM anomalies ORDER BY scope")
@@ -504,3 +512,102 @@ def test_anomaly_scope_validation() -> None:
     with pytest.raises(ValueError, match="affected_cameras"):
         Anomaly(scope="system", **common)
     assert Anomaly(scope="system", affected_cameras=["cam-a"], **common).camera_id is None
+
+
+# ----------------------------------------------------------------------------- warm-up, recovery
+
+
+def test_no_traffic_alerts_during_warmup(service) -> None:
+    svc, sent, _ = service
+    svc.cfg = AnomalyConfig(warmup_seconds=300, max_metric_age_seconds=10**9)
+    cam = "cam-old-street"
+    t = feed(svc, cam, T0, 30)  # 150 s of normal traffic
+    t = feed(svc, cam, t, 8, avg_speed_kmh=4.0, stopped_vehicles=4)  # an "incident" at 3 min
+    assert sent == [] and svc.stats.warming > 0 and not svc.cameras[cam].warm
+    t = feed(svc, cam, t, 30)  # past 300 s: warm
+    assert svc.cameras[cam].warm
+    feed(svc, cam, t, 8, avg_speed_kmh=4.0, stopped_vehicles=4)
+    assert [m.event for _, m in sent] == ["start"]
+    # A gap as long as the warm-up starts it again (as a restart does).
+    later = t + timedelta(minutes=30)
+    feed(svc, "cam-old-street", later, 1)
+    assert not svc.cameras[cam].warm
+    # ...and drops the windows from before the gap, which belong to another time of day.
+    assert [r["ts"] for r in svc.cameras[cam].rows] == [later]
+
+
+class AlwaysHigh:
+    """Wraps a predictor: from `after` checks on, the score stays far above the threshold (as a
+    frozen baseline can keep it), whatever the traffic does."""
+
+    def __init__(self, inner, after: int) -> None:
+        self.inner, self.after, self.calls = inner, after, 0
+
+    def predict(self, frame):
+        out = self.inner.predict(frame)
+        self.calls += 1
+        if self.calls > self.after:
+            out = out.copy()
+            out["score"], out["threshold"] = 5.0, 1.0
+            out["hints"] = '["speed_drop"]'
+            out["top_feature"] = "loop_speed_kmh_rel"
+        return out
+
+
+def test_alert_ends_when_traffic_recovers_even_if_the_score_does_not(service) -> None:
+    from sqlalchemy import text
+
+    svc, sent, engine = service
+    svc.cfg = AnomalyConfig(
+        warmup_seconds=0, max_metric_age_seconds=10**9, update_min_interval_seconds=0
+    )
+    cam = "cam-old-street"
+    svc.models.get("anomaly").predictor = AlwaysHigh(svc.models.get("anomaly").predictor, 40)
+    t = feed(svc, cam, T0, 40)
+    t = feed(svc, cam, t, 10, avg_speed_kmh=4.0)  # speed (camera and loop) far below baseline
+    assert [m.event for _, m in sent] == ["start"]
+    t = feed(svc, cam, t, 4)  # speeds back: an update says since when...
+    update = [m for _, m in sent if m.event == "update"][-1]
+    recovered_since = datetime.fromisoformat(update.details["recovered_since"])
+    assert recovered_since > update.started_at
+    t = feed(svc, cam, t, 12)  # ...and after recovery_seconds (60) the alert ends
+    end = [m for _, m in sent if m.event == "end"]
+    assert len(end) == 1 and end[0].details["closed_by"] == "recovered"
+    assert svc.cameras[cam].active is None and svc.stats.recovered == 1
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM anomalies")).scalar() == "ended"
+
+
+def test_ignored_signals_neither_hold_nor_judge_recovery(service) -> None:
+    from anomaly_service.calibration import CameraSettings
+
+    svc, sent, _ = service
+    cam = "cam-elephant-castle"
+    t = feed(svc, cam, T0, 40)
+    svc.cameras[cam].settings = CameraSettings(ignore=("camera_speed", "stopped_vehicles"))
+    # Only the camera's own speed drops (a panning view), the loops stay at 40 km/h: the rule
+    # model still alarms, but nothing the camera ignores may keep the alert open.
+    for _ in range(110):
+        if (t - T0).total_seconds() % 15 == 0:
+            svc.handle(loop_event(cam, t, 40.0))
+        svc.handle(metrics(cam, t, avg_speed_kmh=4.0))
+        svc.score_all()
+        t += timedelta(seconds=5)
+    assert [m.event for _, m in sent if m.event != "update"][:1] == ["start"]
+    ends = [m for _, m in sent if m.event == "end"]
+    assert ends and all("camera_speed" not in " ".join(m.details.get("hold", [])) for m in ends)
+    assert svc.cameras[cam].tracker.held_checks == 0
+
+
+def test_cameras_that_cannot_alert_yet_are_reported(service) -> None:
+    from anomaly_service.calibration import CameraSettings
+
+    svc, _, _ = service
+    svc.cfg = AnomalyConfig(warmup_seconds=60, max_metric_age_seconds=10**9)
+    svc.settings = {"cam-old-street": CameraSettings(), "cam-hyde-park-corner": CameraSettings()}
+    states = lambda: list(svc.cameras.values())  # noqa: E731
+    assert svc.warming_up(states()) == ["cam-hyde-park-corner", "cam-old-street"]  # no data yet
+    start = datetime.now(UTC) - timedelta(seconds=200)
+    feed(svc, "cam-old-street", start, 40)  # 200 s: past the warm-up, up to now
+    feed(svc, "test-cam-1", start, 5)  # not in the cameras table: never counted
+    assert svc.warming_up(states()) == ["cam-hyde-park-corner"]

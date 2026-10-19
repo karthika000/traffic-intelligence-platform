@@ -53,7 +53,7 @@ def test_anomaly_and_reports_make_one_confirmed_incident(
             )
         )
     producer = TypedProducer(kafka_bootstrap, client_id="test-fusion", register_shutdown=False)
-    service = FusionService(FusionConfig(), engine, producer.send)
+    service = FusionService(FusionConfig(vision_warmup_seconds=0), engine, producer.send)
     start = end_offsets(kafka_bootstrap, Topic.INCIDENTS)
     stop = threading.Event()
     group = f"test-fusion-{uuid.uuid4().hex[:8]}"

@@ -20,6 +20,11 @@ _ENV = {
     "system_frames_ratio": "ANOMALY_SYSTEM_FRAMES_RATIO",
     "system_confidence_ratio": "ANOMALY_SYSTEM_CONFIDENCE_RATIO",
     "system_lookback_seconds": "ANOMALY_SYSTEM_LOOKBACK_SECONDS",
+    "warmup_seconds": "ANOMALY_WARMUP_SECONDS",
+    "calibration_min_sequences": "ANOMALY_CALIBRATION_MIN_SEQUENCES",
+    "recovery_ratio": "ANOMALY_RECOVERY_RATIO",
+    "recovery_seconds": "ANOMALY_RECOVERY_SECONDS",
+    "camera_refresh_seconds": "CAMERA_REFRESH_SECONDS",
     "model_refresh_seconds": "MODEL_REFRESH_SECONDS",
     "stats_interval_seconds": "ANOMALY_STATS_INTERVAL_SECONDS",
     "congestion_model": "CONGESTION_MODEL_NAME",
@@ -48,6 +53,21 @@ class AnomalyConfig:
     hold_speed_ratio: float = 0.6
     hold_stopped_margin: float = 1.0
     max_hold_seconds: float = 1800.0
+    # Warm-up: no traffic alerts for a camera until it has warmup_seconds of metrics (after its
+    # first window, a gap that long, or a restart), so the 10-minute baselines are full. At its
+    # end the camera is calibrated from that history if the model lacks a calibration for it
+    # (anomaly_service.calibration); with fewer than calibration_min_sequences scorable
+    # sequences the warm-up goes on.
+    warmup_seconds: float = 600.0
+    calibration_min_sequences: int = 60
+    # Recovery: an alert with traffic hints ends once loop and camera speed are back to at
+    # least recovery_ratio x the frozen baseline (and stopped vehicles / pedestrians within
+    # hold_stopped_margin of it) for recovery_seconds, even if the score hasn't cleared. From
+    # the first recovered check its updates carry details.recovered_since, so fusion can
+    # resolve on a clearing report without waiting for the end.
+    recovery_ratio: float = 0.85
+    recovery_seconds: float = 60.0
+    camera_refresh_seconds: float = 60.0  # re-read per-camera settings (zone_config.anomaly)
     # Severity from score / threshold: below the 1st bound low, then medium, high, critical.
     severity_bounds: str = "2,4,8"
     # An update is published when severity rises or a new hint appears, at most this often.

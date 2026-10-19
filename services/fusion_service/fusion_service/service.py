@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from prometheus_client import Counter, Gauge
 from sqlalchemy import Engine
 
 from fusion_service.config import FusionConfig
@@ -18,6 +19,10 @@ from traffic_common.schemas import Anomaly, Incident, KafkaMessage, NLPResult, T
 from traffic_common.topics import Topic
 
 log = logging.getLogger(__name__)
+INCIDENTS_OPEN = Gauge("traffic_incidents_open", "Open incidents by status", ["status"])
+INCIDENT_EVENTS = Counter(
+    "traffic_incident_events_total", "Incidents created, confirmed and resolved", ["event"]
+)
 
 
 @dataclass
@@ -117,6 +122,7 @@ class FusionService:
                 self.store.recent_anomalies(self.cfg.window_seconds),
                 self.store.recent_reports(self.cfg.window_seconds),
                 self.store.system_state(),
+                self.store.recent_metrics(self.cfg.window_seconds + self.cfg.vision_warmup_seconds),
             )
         if incidents:
             log.info(
@@ -154,6 +160,9 @@ class FusionService:
             self.fusion.tick(self.clock())
             self._flush()
             self.store.flush_evidence()
+            statuses = [i.status for i in self.fusion.incidents.values()]
+            for status in ("suspected", "confirmed"):
+                INCIDENTS_OPEN.labels(status).set(statuses.count(status))
 
     def _flush(self) -> None:
         for change in self.fusion.drain():
@@ -169,10 +178,13 @@ class FusionService:
         self.stats.published += 1
         if inc.version == 1:
             self.stats.created += 1
+            INCIDENT_EVENTS.labels("created").inc()
         if any(r.startswith("confirmed") for r in change.reasons):
             self.stats.confirmed += 1
+            INCIDENT_EVENTS.labels("confirmed").inc()
         if inc.status == "resolved":
             self.stats.resolved += 1
+            INCIDENT_EVENTS.labels("resolved").inc()
         log.warning(
             "INCIDENT v%d %s camera=%s type=%s severity=%s confidence=%.2f "
             "(vision %.2f, text %.2f, agreement %.2f) reasons=%s id=%s",

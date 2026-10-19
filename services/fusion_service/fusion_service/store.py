@@ -13,7 +13,13 @@ from sqlalchemy import Engine, select, text
 from sqlalchemy.dialects.postgresql import insert
 
 from fusion_service.engine import places_from_entities
-from fusion_service.model import AnomalyEvidence, Change, FusedIncident, ReportEvidence
+from fusion_service.model import (
+    AnomalyEvidence,
+    Change,
+    FusedIncident,
+    MetricPoint,
+    ReportEvidence,
+)
 from ml.nlp.stage import ACTIVE
 from traffic_common.db.models import Camera
 from traffic_common.db.models import Incident as IncidentRow
@@ -149,7 +155,8 @@ class IncidentStore:
     def recent_anomalies(self, window_seconds: float) -> list[AnomalyEvidence]:
         sql = text(
             "SELECT id, camera_id, window_start, window_end, score, threshold, hints, severity, "
-            "congestion_level, status, ended_at FROM anomalies WHERE scope = 'camera' AND "
+            "congestion_level, status, ended_at, details->>'recovered_since' AS recovered_since "
+            "FROM anomalies WHERE scope = 'camera' AND "
             "(status = 'active' OR ended_at > now() - make_interval(secs => :w))"
         )
         with self.engine.connect() as conn:
@@ -169,9 +176,29 @@ class IncidentStore:
                     congestion=r.congestion_level,
                     active=r.status == "active",
                     ended_at=r.ended_at,
+                    recovered_since=datetime.fromisoformat(r.recovered_since)
+                    if r.recovered_since
+                    else None,
                 )
             )
         return out
+
+    def recent_metrics(self, window_seconds: float) -> list[tuple[str, MetricPoint]]:
+        """Every camera's metric windows of the last ``window_seconds``, oldest first."""
+        sql = text(
+            "SELECT camera_id, window_end, avg_speed_kmh, stopped_vehicles, message_id "
+            "FROM traffic_metrics WHERE window_end > now() - make_interval(secs => :w) "
+            "ORDER BY window_end"
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(sql, {"w": window_seconds}).all()
+        return [
+            (
+                r.camera_id,
+                MetricPoint(r.window_end, r.avg_speed_kmh, r.stopped_vehicles, str(r.message_id)),
+            )
+            for r in rows
+        ]
 
     def system_state(self) -> dict | None:
         sql = text(

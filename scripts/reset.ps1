@@ -2,7 +2,7 @@
 .SYNOPSIS
     Tear the platform down to a clean state, so .\scripts\run_demo.ps1 starts from scratch:
     containers, ALL volumes (Kafka, Postgres, MLflow models and runs, frames, Hugging Face and
-    YOLO caches, drift reports) and the generated data under data/ and models/.
+    YOLO caches, drift reports, Prometheus and Grafana) and the generated data under data/.
 .DESCRIPTION
     Asks for confirmation first (type "reset"), unless -Force. Images and Docker's build cache
     are kept unless -Images, so the next run doesn't rebuild everything. .env is kept unless
@@ -34,10 +34,10 @@ if (Test-Path $envFile) {
     if ($line -and $line -match '=\s*(\S+)') { $project = $Matches[1] }
 }
 
-# What will go: generated data (everything under data/ and models/ except the placeholders).
+# What will go: generated data (everything under data/ except the placeholders).
 $keep = @(".gitkeep", "README.md")
 $dataItems = @()
-foreach ($dir in @("data", "models")) {
+foreach ($dir in @("data")) {
     $path = Join-Path $RepoRoot $dir
     if (-not (Test-Path $path)) { continue }
     $dataItems += Get-ChildItem -Force $path | Where-Object {

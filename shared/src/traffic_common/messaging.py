@@ -16,10 +16,15 @@ TypedConsumer
     With ``batch_handler`` and ``max_batch`` > 1, messages that are already waiting are handed
     over together (up to max_batch, never waiting to fill a batch); if a batch fails, its
     messages are retried one by one with the usual retries and dead-lettering.
+
+Both record Prometheus metrics (``traffic_common.telemetry``): messages produced and consumed,
+handler time, message age on arrival, errors by stage, and consumer lag per partition (from
+librdkafka statistics every ``stats_interval_ms``).
 """
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +40,15 @@ from traffic_common.lifecycle import (
     shutdown_event,
 )
 from traffic_common.schemas import TOPIC_SCHEMAS, KafkaMessage, utcnow
+from traffic_common.telemetry import (
+    CONSUMER_LAG,
+    MESSAGE_AGE_SECONDS,
+    MESSAGE_ERRORS,
+    MESSAGES_CONSUMED,
+    MESSAGES_PRODUCED,
+    PROCESSING_SECONDS,
+    record_kafka_stats,
+)
 from traffic_common.topics import dead_letter_topic
 
 log = logging.getLogger(__name__)
@@ -44,6 +58,11 @@ Handler = Callable[[KafkaMessage], None]
 BatchHandler = Callable[[list[KafkaMessage]], None]
 
 _MAX_ERROR_HEADER = 2_000
+
+
+def _topic(msg: Message) -> str:
+    """A consumed or delivered message always has a topic; the type allows None."""
+    return msg.topic() or ""
 
 
 def _schema(schemas: SchemaMap, topic: str) -> type[KafkaMessage]:
@@ -107,23 +126,26 @@ class TypedProducer:
         validated = self.validate(topic, message)
         if key is None:
             key = getattr(validated, "camera_id", None)
-        headers = [
+        headers: list[tuple[str, str | bytes | None]] = [
             ("schema", type(validated).__name__.encode()),
             ("schema_version", str(validated.schema_version).encode()),
         ]
-        kwargs = {
-            "value": validated.model_dump_json().encode(),
-            "key": key.encode() if key else None,
-            "headers": headers,
-            "on_delivery": self._on_delivery,
-        }
+        value = validated.model_dump_json().encode()
+        encoded_key = key.encode() if key else None
+
+        def produce() -> None:
+            self._producer.produce(
+                topic, value=value, key=encoded_key, headers=headers, on_delivery=self._on_delivery
+            )
+
         try:
-            self._producer.produce(topic, **kwargs)
+            produce()
         except BufferError:
             # Local queue full: serve delivery callbacks to drain it, then retry once.
             self._producer.poll(1.0)
-            self._producer.produce(topic, **kwargs)
+            produce()
         self._producer.poll(0)
+        MESSAGES_PRODUCED.labels(topic).inc()
         return validated
 
     def flush(self, timeout: float | None = None) -> int:
@@ -147,6 +169,7 @@ class TypedProducer:
     def _on_delivery(self, err: KafkaError | None, msg: Message) -> None:
         if err is not None:
             self.delivery_errors += 1
+            MESSAGE_ERRORS.labels(_topic(msg), "delivery").inc()
             log.error("delivery to %s failed: %s", msg.topic(), err)
 
 
@@ -181,6 +204,7 @@ class TypedConsumer:
         auto_offset_reset: str = "earliest",
         stop_event: threading.Event | None = None,
         config: Mapping[str, Any] | None = None,
+        stats_interval_ms: int = 15_000,
     ) -> None:
         for topic in topics:
             _schema(schemas, topic)
@@ -192,7 +216,14 @@ class TypedConsumer:
             raise ValueError("a handler or a batch_handler is required")
         self._batch_handler = batch_handler
         self._max_batch = max(1, max_batch) if batch_handler else 1
-        self._handler = handler or (lambda value: batch_handler([value]))
+        if handler is None:
+            assert batch_handler is not None
+            one_by_one = batch_handler
+
+            def handler(value: KafkaMessage) -> None:
+                one_by_one([value])
+
+        self._handler: Handler = handler
         self._schemas = schemas
         self._max_retries = max_retries
         self._initial_backoff = initial_backoff
@@ -209,6 +240,8 @@ class TypedConsumer:
                 "group.id": group_id,
                 "enable.auto.commit": False,
                 "auto.offset.reset": auto_offset_reset,
+                "statistics.interval.ms": stats_interval_ms,
+                "stats_cb": lambda stats: record_kafka_stats(group_id, stats),
                 **(config or {}),
             }
         )
@@ -261,13 +294,19 @@ class TypedConsumer:
     def _on_revoke(self, _consumer: Consumer, partitions: list) -> None:
         self._assigned -= {(p.topic, p.partition) for p in partitions}
         self.health.beat(assigned=len(self._assigned))
+        for p in partitions:  # another consumer reports their lag now
+            try:
+                CONSUMER_LAG.remove(p.topic, str(p.partition), self.group_id)
+            except KeyError:
+                pass
 
     @staticmethod
     def _ok(msg: Message) -> bool:
-        if msg.error():
-            if msg.error().fatal():
-                raise KafkaException(msg.error())
-            log.warning("consumer error: %s", msg.error())
+        error = msg.error()
+        if error is not None:
+            if error.fatal():
+                raise KafkaException(error)
+            log.warning("consumer error: %s", error)
             return False
         return True
 
@@ -276,21 +315,29 @@ class TypedConsumer:
             self._process(msgs[0])
             return
         try:
-            values = [self._schemas[m.topic()].model_validate_json(m.value() or b"") for m in msgs]
+            values = [self._schemas[_topic(m)].model_validate_json(m.value() or b"") for m in msgs]
         except ValidationError:
             values = None  # let the one-by-one path dead-letter the invalid message(s)
         if values is not None:
+            for m, v in zip(msgs, values, strict=True):
+                self._arrived(_topic(m), v)
+            start = time.perf_counter()
             try:
                 assert self._batch_handler is not None
                 self._batch_handler(values)
             except Exception as exc:
+                for m in msgs:
+                    MESSAGE_ERRORS.labels(_topic(m), "handler").inc()
                 log.warning(
                     "batch of %d failed (%s); processing its messages one by one", len(msgs), exc
                 )
             else:
-                last: dict[tuple[str, int], Message] = {}
+                each = (time.perf_counter() - start) / len(msgs)
                 for m in msgs:
-                    last[(m.topic(), m.partition())] = m  # offsets only grow per partition
+                    PROCESSING_SECONDS.labels(_topic(m), self.group_id).observe(each)
+                last: dict[tuple[str, int | None], Message] = {}
+                for m in msgs:
+                    last[(_topic(m), m.partition())] = m  # offsets only grow per partition
                 for m in last.values():
                     self._commit(m)
                 self.stats.processed += len(msgs)
@@ -299,23 +346,34 @@ class TypedConsumer:
         for m in msgs:
             if self._stop.is_set():
                 return  # uncommitted: redelivered after restart
-            self._process(m)
+            self._process(m, arrived=values is not None)
 
-    def _process(self, msg: Message) -> None:
-        schema = self._schemas[msg.topic()]
+    def _arrived(self, topic: str, value: KafkaMessage) -> None:
+        MESSAGES_CONSUMED.labels(topic, self.group_id).inc()
+        age = (utcnow() - value.timestamp).total_seconds()
+        MESSAGE_AGE_SECONDS.labels(topic, self.group_id).observe(max(age, 0.0))
+
+    def _process(self, msg: Message, arrived: bool = False) -> None:
+        topic = _topic(msg)
+        schema = self._schemas[topic]
         try:
             value = schema.model_validate_json(msg.value() or b"")
         except ValidationError as exc:
+            MESSAGE_ERRORS.labels(topic, "validation").inc()
             self._dead_letter(msg, "validation", exc, attempts=0)
             self._commit(msg)
             return
+        if not arrived:  # a batch that fell back to one by one counted its messages already
+            self._arrived(topic, value)
 
         attempt = 0
         while True:
             attempt += 1
+            start = time.perf_counter()
             try:
                 self._handler(value)
             except Exception as exc:
+                MESSAGE_ERRORS.labels(topic, "handler").inc()
                 if attempt > self._max_retries:
                     self._dead_letter(msg, "processing", exc, attempts=attempt)
                     self._commit(msg)
@@ -341,12 +399,15 @@ class TypedConsumer:
                     )
                     return
             else:
+                PROCESSING_SECONDS.labels(topic, self.group_id).observe(time.perf_counter() - start)
                 self._commit(msg)
                 self.stats.processed += 1
                 return
 
     def _dead_letter(self, msg: Message, reason: str, error: Exception, attempts: int) -> None:
-        headers = list(msg.headers() or [])
+        original = msg.headers() or []  # a list on consumed messages; the type also allows a dict
+        items = original.items() if isinstance(original, dict) else original
+        headers: list[tuple[str, str | bytes | None]] = [(k, v) for k, v in items]
         headers += [
             (k, str(v).encode())
             for k, v in {
@@ -380,6 +441,7 @@ class TypedConsumer:
                 f"{failures[0] if failures else 'flush timed out'}"
             )
         self.stats.dead_lettered += 1
+        MESSAGE_ERRORS.labels(_topic(msg), "dead_letter").inc()
         log.error(
             "sent %s[%d]@%d to %s (%s): %s",
             msg.topic(),

@@ -28,8 +28,9 @@ param(
     [string]$Scenario = "",
     [string]$ScenarioCamera = "cam-hyde-park-corner",
     [double]$TimeScale = 6,
-    # Minutes of running before -Scenario is triggered: the anomaly detector compares each camera
-    # with its own last ~10 minutes, so earlier incidents are seen by the text reports only.
+    # Minutes of running before -Scenario is triggered: anomaly_service raises no alerts for a
+    # camera until it has 10 minutes of history (ANOMALY_WARMUP_SECONDS), so earlier incidents
+    # are seen by the text reports only. It then also waits for that warm-up to be reported done.
     [int]$WarmupMinutes = 10,
     # Minutes of clean detections the vehicle-detector drift reference is built from.
     [int]$ReferenceMinutes = 5,
@@ -169,12 +170,14 @@ $EnvVars = Read-EnvFile $(if (Test-Path $EnvPath) { $EnvPath } else { Join-Path 
 $Ports = [ordered]@{
     DASHBOARD_PORT = 5173; API_PORT = 8001; KAFKA_PORT = 9092; KAFKA_UI_PORT = 8080
     POSTGRES_PORT = 5432; MLFLOW_PORT = 5000; ADMINER_PORT = 8081
+    PROMETHEUS_PORT = 9090; GRAFANA_PORT = 3000
 }
 foreach ($k in @($Ports.Keys)) { $Ports[$k] = [int](Get-Setting $k $Ports[$k]) }
 $Project = Get-Setting "COMPOSE_PROJECT_NAME" "traffic-intel"
 $ApiUrl = "http://127.0.0.1:$($Ports.API_PORT)"
 $MlflowUrl = "http://127.0.0.1:$($Ports.MLFLOW_PORT)"
 $DashboardUrl = "http://localhost:$($Ports.DASHBOARD_PORT)"
+$PrometheusUrl = "http://127.0.0.1:$($Ports.PROMETHEUS_PORT)"
 $ScenarioNames = @(Get-ChildItem (Join-Path $RepoRoot "services\event_simulator\scenarios") -Filter *.yaml | ForEach-Object { $_.BaseName })
 if ($Scenario -and $ScenarioNames -notcontains $Scenario) {
     throw "Unknown scenario '$Scenario'. Available: $($ScenarioNames -join ', ')"
@@ -468,6 +471,16 @@ try {
                 Write-Host ("    warming up (anomaly baselines): {0} to go" -f (Format-Duration ($ready - (Get-Date)).TotalSeconds))
                 Start-Sleep -Seconds ([math]::Min(60, [math]::Max(1, ($ready - (Get-Date)).TotalSeconds)))
             }
+            # anomaly_service's own warm-up starts at each camera's first metrics window: wait
+            # (up to 5 more minutes) until Prometheus reports no camera still warming up.
+            $query = "$PrometheusUrl/api/v1/query?query=traffic_cameras_warming_up"
+            $until = (Get-Date).AddMinutes(5)
+            while ((Get-Date) -lt $until) {
+                $warming = try { [int](Invoke-RestMethod -TimeoutSec 5 $query).data.result[0].value[1] } catch { -1 }
+                if ($warming -eq 0) { break }
+                Write-Host "    anomaly_service: $(if ($warming -gt 0) { "$warming camera(s) still warming up" } else { 'warm-up state not available yet' })"
+                Start-Sleep -Seconds 15
+            }
             $body = @{ camera_id = $ScenarioCamera; time_scale = $TimeScale } | ConvertTo-Json
             $r = Invoke-RestMethod -Method Post -TimeoutSec 15 -ContentType "application/json" -Body $body "$ApiUrl/api/v1/scenarios/$Scenario/trigger"
             Write-Host "    scenario_id $($r.scenario_id); follow it on $DashboardUrl/demo"
@@ -496,6 +509,8 @@ Write-Host "API        http://localhost:$($Ports.API_PORT)  (docs: /docs)" -Fore
 Write-Host "Kafka UI   http://localhost:$($Ports.KAFKA_UI_PORT)" -ForegroundColor Green
 Write-Host "MLflow     http://localhost:$($Ports.MLFLOW_PORT)" -ForegroundColor Green
 Write-Host "Adminer    http://localhost:$($Ports.ADMINER_PORT)  (PostgreSQL / postgres / traffic / traffic / traffic)" -ForegroundColor Green
+Write-Host "Grafana    http://localhost:$($Ports.GRAFANA_PORT)  (Traffic Intelligence dashboard; admin login from .env)" -ForegroundColor Green
+Write-Host "Prometheus http://localhost:$($Ports.PROMETHEUS_PORT)  (targets: /targets)" -ForegroundColor Green
 Write-Host "Kafka      localhost:$($Ports.KAFKA_PORT)   Postgres  localhost:$($Ports.POSTGRES_PORT)"
 Write-Host ""
 Write-Host "Logs: .\scripts\logs.ps1   End-to-end test: .\scripts\e2e_test.ps1   Stop: .\scripts\down.ps1   Clean slate: .\scripts\reset.ps1"

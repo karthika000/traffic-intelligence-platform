@@ -404,6 +404,25 @@ def test_scenario_run_emits_tagged_escalating_timeline() -> None:
     assert sum(critical) / len(critical) < 0.5 * sum(resolved) / len(resolved)
 
 
+def test_every_run_ends_with_a_clearing_report() -> None:
+    """The first report of a cleared-stage phase comes as the phase starts, so even a run sped
+    up so far that its final phase lasts a fraction of a second says it's over."""
+    sent = Collector()
+    sim = make_simulator(sent)
+    stages: list[str] = []
+    report = sim.emitter.report
+
+    def spy(camera, generated, scenario_id=None, phase=None):
+        stages.append(generated.stage.value)
+        return report(camera, generated, scenario_id=scenario_id, phase=phase)
+
+    sim.emitter.report = spy
+    runner = sim.start_scenario("flooding", "cam-hyde-park-corner", time_scale=3000)
+    runner.join(timeout=20)
+    assert runner.status.value == "completed"
+    assert "cleared" in stages
+
+
 def test_flooding_overrides_weather_then_releases_it() -> None:
     sent = Collector()
     sim = make_simulator(sent)

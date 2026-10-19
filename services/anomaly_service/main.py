@@ -3,7 +3,9 @@
 Consumes traffic.metrics and events.raw (group anomaly-service). Loop-detector readings are
 stored in sensor_readings; metric windows are joined with the latest reading per camera.
 Every few seconds each camera's recent windows go through the congestion classifier and
-the anomaly detector (MLflow champions, or rule-based fallbacks). Anomaly episodes are
+the anomaly detector (MLflow champions, or rule-based fallbacks). A camera raises no alerts
+during its warm-up (ANOMALY_WARMUP_SECONDS after its first metrics or a restart), at the end of
+which it is calibrated if the model lacks a calibration for it. Anomaly episodes are
 published to `anomalies` (start and end events) and stored in Postgres together with the
 current congestion level per camera.
 """
@@ -19,6 +21,7 @@ from traffic_common.db import create_db_engine
 from traffic_common.health import heartbeat
 from traffic_common.lifecycle import install_signal_handlers, run_shutdown_callbacks
 from traffic_common.messaging import TypedConsumer, TypedProducer
+from traffic_common.telemetry import serve_metrics
 from traffic_common.topics import ConsumerGroup, Topic
 
 SERVICE_NAME = "anomaly_service"
@@ -29,6 +32,7 @@ def main() -> None:
     log = get_logger(SERVICE_NAME, settings.log_level)
     get_logger("traffic_common", settings.log_level)
     install_signal_handlers(log)
+    serve_metrics()
     config = AnomalyConfig.from_env()
     log.info("starting: %s", config)
     import torch
@@ -48,6 +52,7 @@ def main() -> None:
     service = AnomalyService(config, engine, models, producer.send)
     service_ref["svc"] = service
     service.close_orphaned_anomalies()
+    service.refresh_settings()
     models.refresh()
 
     consumer = TypedConsumer(
@@ -85,6 +90,12 @@ def main() -> None:
             target=every,
             args=(config.model_refresh_seconds, models.refresh),
             name="model-refresh",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=every,
+            args=(config.camera_refresh_seconds, service.refresh_settings),
+            name="camera-settings",
             daemon=True,
         ),
         threading.Thread(
