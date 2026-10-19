@@ -108,6 +108,12 @@ jobs:
           tags: traffic-intel/tests:ci
           cache-from: type=gha,scope=tests
           cache-to: type=gha,scope=tests,mode=max
+      # data/ is git-ignored. Generate what the tests read that is cheap and deterministic
+      # (the NLP dataset: fixed seeds, ~5 s); tests needing the rest (sample videos) skip.
+      - name: Generate test data
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo/services/event_simulator
+          --entrypoint python traffic-intel/tests:ci -m event_simulator.dataset --out /repo/data/nlp
       - name: pytest -m "not integration"
         run: >-
           docker run --rm -v "$PWD:/repo" -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2
@@ -148,6 +154,12 @@ jobs:
           load: true
           tags: traffic-intel/tests:ci
           cache-from: type=gha,scope=tests
+      # data/ is git-ignored. Generate what the tests read that is cheap and deterministic
+      # (the NLP dataset: fixed seeds, ~5 s); tests needing the rest (sample videos) skip.
+      - name: Generate test data
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo/services/event_simulator
+          --entrypoint python traffic-intel/tests:ci -m event_simulator.dataset --out /repo/data/nlp
       - name: Create the Kafka topics (as scripts/create_topics.ps1 does)
         run: |
           docker run --rm --network host -v "$PWD:/repo" --entrypoint python traffic-intel/tests:ci -c '
@@ -160,6 +172,12 @@ jobs:
               future.result()
               print("created", name)
           '
+      # The healthcheck only proves the broker answers; on a fresh broker the group coordinator
+      # can still be loading, and the first tests' consumer groups would miss their messages.
+      - name: Wait for Kafka's group coordinator
+        run: >-
+          docker run --rm --network host -v "$PWD:/repo" --entrypoint python traffic-intel/tests:ci
+          scripts/wait_for_kafka.py --bootstrap-servers localhost:9092 --timeout 180
       - name: pytest -m integration
         run: >-
           docker run --rm --network host -v "$PWD:/repo"

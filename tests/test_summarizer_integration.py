@@ -26,12 +26,12 @@ from alembic import command  # noqa: E402
 from confluent_kafka import Consumer  # noqa: E402
 from sqlalchemy import insert, text  # noqa: E402
 
+from kafka_helpers import end_offsets, start_group_at_end, wait_for_assignment  # noqa: E402
 from ml.registry import ModelManager  # noqa: E402
 from ml.summarize.pyfunc import IncidentSummarizerModel  # noqa: E402
 from ml.summarize.summarizer import SummarizerConfig  # noqa: E402
 from summarizer_service.config import SummarizerServiceConfig  # noqa: E402
 from summarizer_service.service import SummarizerService  # noqa: E402
-from test_anomaly_integration import end_offsets  # noqa: E402
 from traffic_common.db import create_db_engine  # noqa: E402
 from traffic_common.db.migrate import alembic_config  # noqa: E402
 from traffic_common.db.models import Camera  # noqa: E402
@@ -96,9 +96,7 @@ def test_incident_produces_summary(kafka_bootstrap: str, scratch_database: str) 
         SummarizerServiceConfig(debounce_seconds=0.5), engine, models, producer.send
     )
     group = f"test-summarizer-{uuid.uuid4().hex[:8]}"
-    seed = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": group})
-    seed.commit(offsets=end_offsets(kafka_bootstrap, Topic.INCIDENTS), asynchronous=False)
-    seed.close()
+    start_group_at_end(kafka_bootstrap, group, [Topic.INCIDENTS])
     start_summaries = end_offsets(kafka_bootstrap, Topic.SUMMARIES)
     stop = threading.Event()
     consumer = TypedConsumer(
@@ -122,6 +120,7 @@ def test_incident_produces_summary(kafka_bootstrap: str, scratch_database: str) 
     for t in threads:
         t.start()
     try:
+        wait_for_assignment(consumer, kafka_bootstrap)
         message = Incident(
             incident_id=incident_id,
             camera_id=camera,

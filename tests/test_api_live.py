@@ -121,8 +121,8 @@ def test_live_websocket_end_to_end(kafka_bootstrap: str, scratch_database: str) 
     mine, other = f"test-cam-{uuid.uuid4().hex[:6]}", f"test-cam-{uuid.uuid4().hex[:6]}"
     with TestClient(app) as client:
         hub = app.state.hub
-        assert hub.assigned.wait(30), "live consumer never got its partitions"
-        time.sleep(2)  # let it settle on the latest offsets
+        # Assigned means positioned at the end offsets: everything sent from now on arrives.
+        assert hub.assigned.wait(60), "live consumer never got its partitions"
         ready = client.get("/ready").json()
         assert ready["checks"]["live_consumer"] == "ok", ready
         with client.websocket_connect(

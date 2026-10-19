@@ -190,6 +190,21 @@ def test_dataset_splits(tmp_path: Path) -> None:
         assert row["location_mention"] == "" or row["location_mention"] in row["text"]
 
 
+def test_dataset_is_reproducible_and_ignores_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI regenerates data/nlp from the seeds, so the files must never depend on when."""
+    import event_simulator.reports as reports
+
+    class NoClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            raise AssertionError("the dataset read the clock")
+
+    monkeypatch.setattr(reports, "datetime", NoClock)
+    first = dataset.generate_split(CAMERAS, 300, 5, Variant.TEST)
+    again = dataset.generate_split(CAMERAS, 300, 5, Variant.TEST)
+    assert [r.text for r in first] == [r.text for r in again]
+
+
 def test_dataset_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert dataset.main(["--out", str(tmp_path), "--train", "300", "--test", "100"]) == 0
     out = capsys.readouterr().out

@@ -9,6 +9,7 @@ The test split uses a different seed and the holdout phrase pools (unseen templa
 incident and severity phrases, location forms) about half the time, so a good score
 on it means the model generalises rather than memorising templates. Exact duplicate
 texts are removed within each split, and any test text also present in train is dropped.
+Output depends only on the seeds and sizes (report times are seeded too), never the clock.
 
 In Docker, the default output /data/nlp is ./data/nlp on the host.
 """
@@ -19,6 +20,7 @@ import random
 import sys
 from collections import Counter
 from collections.abc import Iterable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from event_simulator.config import SimulatorConfig
@@ -36,6 +38,7 @@ from traffic_common.enums import IncidentType
 COLUMNS = ["text", "incident_type", "severity", "camera_id", "location_mention", "source"]
 CLEARED_SHARE = 0.08  # share of incident reports describing a cleared incident
 TRAIN_SEED, TEST_SEED = 20261014, 777
+MIDNIGHT = datetime(2026, 1, 1)  # report times ({time}) are drawn within one day from here
 
 
 def demo_cameras() -> list[CameraInfo]:
@@ -53,6 +56,9 @@ def generate_split(
     exclude: set[str] = frozenset(),
 ) -> list[GeneratedReport]:
     rng = random.Random(seed)
+    # Times come from their own stream, not the clock, so a seed always gives the same file
+    # (and drawing them doesn't change any other choice).
+    clock = random.Random(seed + 1)
     gen = ReportGenerator(rng, variant)
     rows: list[GeneratedReport] = []
     seen = set(exclude)
@@ -67,7 +73,10 @@ def generate_split(
             if incident_type is not IncidentType.NONE and rng.random() < CLEARED_SHARE
             else Stage.ACTIVE
         )
-        report = gen.generate(rng.choice(cameras), incident_type=incident_type, stage=stage)
+        now = MIDNIGHT + timedelta(minutes=clock.randrange(24 * 60))
+        report = gen.generate(
+            rng.choice(cameras), incident_type=incident_type, stage=stage, now=now
+        )
         if report.text in seen:
             continue
         seen.add(report.text)

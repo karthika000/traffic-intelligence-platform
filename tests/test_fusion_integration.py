@@ -26,7 +26,7 @@ from sqlalchemy import insert, text  # noqa: E402
 
 from fusion_service.config import FusionConfig  # noqa: E402
 from fusion_service.service import FusionService  # noqa: E402
-from test_anomaly_integration import end_offsets  # noqa: E402
+from kafka_helpers import end_offsets, start_group_at_end, wait_for_assignment  # noqa: E402
 from traffic_common.db import create_db_engine  # noqa: E402
 from traffic_common.db.migrate import alembic_config  # noqa: E402
 from traffic_common.db.models import Camera  # noqa: E402
@@ -59,13 +59,7 @@ def test_anomaly_and_reports_make_one_confirmed_incident(
     group = f"test-fusion-{uuid.uuid4().hex[:8]}"
     # Start the group at the current end of both topics: no replay of their history, and no
     # race with the first partition assignment.
-    seed = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": group})
-    seed.commit(
-        offsets=end_offsets(kafka_bootstrap, Topic.ANOMALIES)
-        + end_offsets(kafka_bootstrap, Topic.NLP_RESULTS),
-        asynchronous=False,
-    )
-    seed.close()
+    start_group_at_end(kafka_bootstrap, group, [Topic.ANOMALIES, Topic.NLP_RESULTS])
     consumer = TypedConsumer(
         [Topic.ANOMALIES, Topic.NLP_RESULTS],
         group,
@@ -78,6 +72,7 @@ def test_anomaly_and_reports_make_one_confirmed_incident(
     thread = threading.Thread(target=consumer.run, daemon=True)
     thread.start()
     try:
+        wait_for_assignment(consumer, kafka_bootstrap)
         now = datetime.now(UTC)
         anomaly = Anomaly(
             camera_id=camera,

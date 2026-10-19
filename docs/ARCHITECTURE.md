@@ -1068,4 +1068,6 @@ The command writes `data/nlp/reports_train.csv` (5,000 rows) and `data/nlp/repor
 - **Phrasings:** every phrase pool (templates, incident and severity phrases, location forms) has held-out entries that only the test split uses, about half the time. A good test score therefore means the model generalises beyond memorised templates.
 - **Duplicates:** texts are unique within each split, and no test text appears in train.
 
+The output depends only on the seeds and sizes. Report times come from a seeded stream, not the clock, so a run writes identical files wherever and whenever it runs (CI generates them before the tests).
+
 Options: `--train N`, `--test N`, `--train-seed`, `--test-seed`, `--out DIR`.

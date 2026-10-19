@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from confluent_kafka import Consumer, KafkaException
+from confluent_kafka import OFFSET_END, Consumer, KafkaException, TopicPartition
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prometheus_client import Gauge
 from pydantic import ValidationError
@@ -123,7 +123,7 @@ class LiveHub:
             }
         )
         try:
-            consumer.subscribe(self.topics, on_assign=lambda c, parts: self.assigned.set())
+            consumer.subscribe(self.topics, on_assign=self._on_assign)
             self.running = True
             log.info("live consumer %s on %s", self.group, self.topics)
             while not self._stop.is_set():
@@ -142,6 +142,17 @@ class LiveHub:
         finally:
             self.running = False
             consumer.close()
+
+    def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
+        """Start at the current end offsets, looked up now: auto.offset.reset would resolve
+        "latest" only later, so messages produced right after `assigned` could be skipped."""
+        for p in partitions:
+            try:
+                p.offset = consumer.get_watermark_offsets(p, timeout=10)[1]
+            except KafkaException:
+                p.offset = OFFSET_END  # fall back to resolving it later
+        consumer.assign(partitions)
+        self.assigned.set()
 
     def _handle(self, topic: str, raw: bytes | None) -> None:
         self.stats["received"] += 1

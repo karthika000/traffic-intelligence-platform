@@ -32,6 +32,7 @@ from event_simulator.emitter import Emitter  # noqa: E402
 from event_simulator.groundtruth import GroundTruthStore  # noqa: E402
 from event_simulator.simulator import Simulator  # noqa: E402
 from event_simulator.trigger import send_command  # noqa: E402
+from kafka_helpers import end_offsets, start_group_at_end, wait_for_assignment  # noqa: E402
 from traffic_common.db import create_db_engine  # noqa: E402
 from traffic_common.db.migrate import alembic_config  # noqa: E402
 from traffic_common.db.models import Camera, ScenarioRun, SimulatedReport  # noqa: E402
@@ -40,20 +41,6 @@ from traffic_common.schemas import RawEvent, SimulatorCommand, TextReport  # noq
 from traffic_common.topics import Topic  # noqa: E402
 
 TIME_SCALE = 240  # road_works: 20 min -> 5 s
-
-
-def end_offsets(bootstrap: str, topic: str) -> list[TopicPartition]:
-    c = Consumer({"bootstrap.servers": bootstrap, "group.id": f"probe-{uuid.uuid4().hex}"})
-    try:
-        parts = c.list_topics(topic, timeout=10).topics[topic].partitions
-        return [
-            TopicPartition(
-                topic, p, c.get_watermark_offsets(TopicPartition(topic, p), timeout=10)[1]
-            )
-            for p in parts
-        ]
-    finally:
-        c.close()
 
 
 def read_tagged(
@@ -113,29 +100,32 @@ def test_triggered_scenario_reaches_kafka_and_postgres(
         )
         sim.refresh_cameras()
         assert camera_id in sim.cameras
+        group = f"test-sim-{uuid.uuid4().hex[:8]}"
+        start_group_at_end(kafka_bootstrap, group, [Topic.SIMULATOR_CONTROL])
         control = TypedConsumer(
             [Topic.SIMULATOR_CONTROL],
-            f"test-sim-{uuid.uuid4().hex[:8]}",
+            group,
             sim.handle_command,
             kafka_bootstrap,
             stop_event=stop,
-            auto_offset_reset="latest",
             poll_timeout=0.2,
+            auto_offset_reset="earliest",  # only applies if the commit above were missing
         )
         control_thread = threading.Thread(target=control.run, daemon=True)
         control_thread.start()
         try:
+            wait_for_assignment(control, kafka_bootstrap)
             cmd = SimulatorCommand(
                 action="start_scenario",
                 scenario="road_works",
                 camera_id=camera_id,
                 time_scale=TIME_SCALE,
             )
-            # The group joins asynchronously and starts at "latest": resend until it is picked up.
+            send_command(cmd, kafka_bootstrap)
             deadline = time.monotonic() + 30
             while camera_id not in sim.runs and time.monotonic() < deadline:
-                send_command(cmd, kafka_bootstrap)
-                time.sleep(2)
+                time.sleep(0.2)
+            assert camera_id in sim.runs, "the simulator never picked up the start command"
             runner = sim.runs[camera_id]
             assert runner.run_id == cmd.scenario_id
             runner.join(timeout=30)

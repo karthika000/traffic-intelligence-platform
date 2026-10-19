@@ -24,11 +24,12 @@ pytest.importorskip("confluent_kafka", reason=SMART_APP_CONTROL_HINT, exc_type=I
 pytest.importorskip("pandas")
 pytest.importorskip("mlflow")
 from alembic import command  # noqa: E402
-from confluent_kafka import Consumer, TopicPartition  # noqa: E402
+from confluent_kafka import Consumer  # noqa: E402
 from sqlalchemy import insert, text  # noqa: E402
 
 from anomaly_service.config import AnomalyConfig  # noqa: E402
 from anomaly_service.service import AnomalyService  # noqa: E402
+from kafka_helpers import end_offsets, start_group_at_end, wait_for_assignment  # noqa: E402
 from test_anomaly_service import FakeRegistry, manager  # noqa: E402
 from traffic_common.db import create_db_engine  # noqa: E402
 from traffic_common.db.migrate import alembic_config  # noqa: E402
@@ -36,20 +37,6 @@ from traffic_common.db.models import Camera  # noqa: E402
 from traffic_common.messaging import TypedConsumer, TypedProducer  # noqa: E402
 from traffic_common.schemas import Anomaly, TrafficMetrics  # noqa: E402
 from traffic_common.topics import Topic  # noqa: E402
-
-
-def end_offsets(bootstrap: str, topic: str) -> list[TopicPartition]:
-    c = Consumer({"bootstrap.servers": bootstrap, "group.id": f"probe-{uuid.uuid4().hex}"})
-    try:
-        parts = c.list_topics(topic, timeout=10).topics[topic].partitions
-        return [
-            TopicPartition(
-                topic, p, c.get_watermark_offsets(TopicPartition(topic, p), timeout=10)[1]
-            )
-            for p in parts
-        ]
-    finally:
-        c.close()
 
 
 def test_incident_sequence_raises_anomaly(kafka_bootstrap: str, scratch_database: str) -> None:
@@ -75,18 +62,20 @@ def test_incident_sequence_raises_anomaly(kafka_bootstrap: str, scratch_database
         # One scoring pass after the burst, so a single check above threshold must suffice.
         cfg = AnomalyConfig(warmup_seconds=0, max_metric_age_seconds=600, min_consecutive=1)
         service = AnomalyService(cfg, engine, mm, producer.send)
+        group = f"test-anomaly-{uuid.uuid4().hex[:8]}"
+        start_group_at_end(kafka_bootstrap, group, [Topic.TRAFFIC_METRICS])
         consumer = TypedConsumer(
             [Topic.TRAFFIC_METRICS],
-            f"test-anomaly-{uuid.uuid4().hex[:8]}",
+            group,
             service.handle,
             kafka_bootstrap,
             stop_event=stop,
-            auto_offset_reset="latest",
             poll_timeout=0.2,
+            auto_offset_reset="earliest",  # only applies if the commit above were missing
         )
         thread = threading.Thread(target=consumer.run, daemon=True)
         thread.start()
-        time.sleep(5)  # let the new group get its partitions at the live edge
+        wait_for_assignment(consumer, kafka_bootstrap)
         start = end_offsets(kafka_bootstrap, Topic.ANOMALIES)
 
         # 30 normal windows, then a sudden incident: speed collapses, vehicles stop.

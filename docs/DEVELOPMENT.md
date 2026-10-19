@@ -168,9 +168,13 @@ Run one service outside Docker: `python services\api\main.py`. Outside Docker, `
 | Dashboard | `npm ci` and `npm run check` (TypeScript, ESLint, Vitest) |
 | Build images | `docker build` of every image (11, as a matrix), with the GitHub Actions layer cache |
 | Unit tests | The test image (`tests/Dockerfile`, as `test.ps1` uses) with `-m "not integration"` |
-| Integration tests | The same image against Postgres and Kafka service containers, after creating the topics, with `-m integration` |
+| Integration tests | The same image against Postgres and Kafka service containers, after creating the topics and waiting for Kafka's group coordinator, with `-m integration` |
 
-The test jobs run in the same image as `.\scripts\test.ps1`, so CI and a local run use the same dependencies. In CI the cv_inference integration test skips, because the sample videos are downloaded, not committed.
+The test jobs run in the same image as `.\scripts\test.ps1`, so CI and a local run use the same dependencies.
+
+`data/` is git-ignored, so both test jobs first generate the NLP dataset (`python -m event_simulator.dataset`: fixed seeds, a few seconds). Tests whose data can't be generated skip with a reason: in CI the cv_inference integration test skips, because the sample videos are downloaded, not committed. Locally, `test_nlp.py`'s accuracy test skips until the dataset exists.
+
+A Kafka service container counts as healthy once the broker answers, but its group coordinator can still be loading. A consumer group created then joins late, and with `auto.offset.reset=latest` it skips whatever a test produced in the meantime. So CI runs [`scripts/wait_for_kafka.py`](../scripts/wait_for_kafka.py) first, which waits until a probe consumer group has joined and committed, and an idempotent producer has written a message. The integration tests don't depend on that probe or on fixed sleeps: they commit their consumer group's starting offsets up front and wait for the actual partition assignment (`tests/kafka_helpers.py`).
 
 ## End-to-end test
 

@@ -10,6 +10,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "services" / "nlp_service")]
+# Generated (data/ is git-ignored): python -m event_simulator.dataset, as CI does first.
+REPORTS_TEST = ROOT / "data" / "nlp" / "reports_test.csv"
 
 pytest.importorskip("rapidfuzz")
 pd = pytest.importorskip("pandas")
@@ -161,7 +163,12 @@ def test_derived_gazetteer_cameras_can_be_matched() -> None:
 
 def test_camera_matching_accuracy_on_the_test_split(matcher) -> None:
     """Guards against regressions on the held-out set (unseen location forms are ~30%)."""
-    test = pd.read_csv(ROOT / "data" / "nlp" / "reports_test.csv")
+    if not REPORTS_TEST.exists():
+        pytest.skip(
+            f"{REPORTS_TEST.relative_to(ROOT).as_posix()} missing; generate it with "
+            "`python -m event_simulator.dataset` (in services/event_simulator)"
+        )
+    test = pd.read_csv(REPORTS_TEST)
     predicted = [matcher.match(t).camera_id for t in test.text]
     correct = sum(p == c for p, c in zip(predicted, test.camera_id, strict=True))
     wrong = sum(p is not None and p != c for p, c in zip(predicted, test.camera_id, strict=True))
